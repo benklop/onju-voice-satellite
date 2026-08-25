@@ -2,8 +2,8 @@
 # A drop-in ESPHome firmware for the Onju Voice PCB that turns a
 # Google Nest Mini (2nd gen) into a Home Assistant voice satellite.
 #
-# Based on Idskov/onju-voice-esphome v1.5.1 (6b1809d). Native ESPHome
-# components only — no gnumpi/esphome_audio, no Arduino framework.
+# Based on Idskov/onju-voice-esphome v1.5.1 (6b1809d). Duplex I2S via
+# n-IA-hane/esphome-audio-stack (no gnumpi, no Arduino).
 #
 # Hardware: Onju Voice PCB (ESP32-S3) by justLV
 #   I2S: LRCLK=GPIO13, BCLK=GPIO18, DOUT=GPIO12, DIN=GPIO17
@@ -15,15 +15,17 @@
 substitutions:
   name: onju-voice
   friendly_name: Onju Voice
+  # Roy's working slot on this PCB. Overlay `mic_channel: left` if MWW is deaf.
+  mic_channel: "right"
 
 esphome:
   name: ${name}
   name_add_mac_suffix: true
   friendly_name: ${friendly_name}
-  min_version: 2026.2.0
+  min_version: 2026.5.0
   project:
     name: benklop.onju_voice_satellite
-    version: "2.0.0"
+    version: "2.1.0"
   platformio_options:
     board_build.flash_mode: dio
     board_build.arduino.memory_type: qio_opi
@@ -143,34 +145,53 @@ time:
               }
 
 # --- Audio ---
-# The Onju Voice has a shared I2S bus for both microphone and speaker.
-# They cannot run simultaneously — ESPHome handles bus arbitration via
-# the media_player wrapper.
+# Shared I2S (SPH0645 MEMS + I2S amp, no codec). Native i2s_audio cannot
+# own both directions on one clock; two buses with allow_other_uses
+# corrupts audio. One stack owner runs mic + speaker together.
+# Physical bus 48 kHz; mic / AEC / MWW stay 16 kHz.
+# Software AEC is not XMOS — barge-in is usable, wake-word-during-loud-
+# music is not 100%. Tuning (channel, filter, gains) is follow-on work.
 
-i2s_audio:
-  - id: i2s_shared
-    i2s_lrclk_pin: GPIO13
-    i2s_bclk_pin: GPIO18
+external_components:
+  - source: github://n-IA-hane/esphome-audio-stack@v2026.7.0
+    components: [esp_audio_stack, esp_aec]
+
+esp_aec:
+  id: aec_processor
+  sample_rate: 16000
+  mode: sr_low_cost
+  filter_length: 4  # 64 ms tail
+
+esp_audio_stack:
+  id: i2s_shared
+  i2s_lrclk_pin: GPIO13
+  i2s_bclk_pin: GPIO18
+  i2s_din_pin: GPIO17
+  i2s_dout_pin: GPIO12
+  sample_rate: 48000
+  output_sample_rate: 16000
+  bits_per_sample: 32
+  slot_bit_width: 32
+  correct_dc_offset: true  # SPH0645 DC bias
+  rx_slot_mode: stereo  # full L/R frame, then pick one SPH0645
+  mic_channel: ${mic_channel}  # do not set num_channels: 2 — stereo mix is 1–2 dB SNR
+  buffers_in_psram: true
+  processor_id: aec_processor
+  aec_reference: ring_buffer
+  aec_reference_buffer_ms: 120
 
 microphone:
-  - platform: i2s_audio
+  - platform: esp_audio_stack
     id: onju_mic
-    i2s_audio_id: i2s_shared
-    i2s_din_pin: GPIO17
-    adc_type: external
-    channel: left
-    sample_rate: 16000
-    bits_per_sample: 32bit
+    esp_audio_stack_id: i2s_shared
 
 speaker:
-  - platform: i2s_audio
+  - platform: esp_audio_stack
     id: i2s_speaker
-    i2s_audio_id: i2s_shared
-    i2s_dout_pin: GPIO12
-    dac_type: external
-    channel: left
-    sample_rate: 16000
-    bits_per_sample: 32bit
+    esp_audio_stack_id: i2s_shared
+    sample_rate: 48000
+    bits_per_sample: 16
+    num_channels: 1
     buffer_duration: 100ms
 
   - platform: mixer
@@ -178,9 +199,30 @@ speaker:
     output_speaker: i2s_speaker
     queue_mode: true
     source_speakers:
-      - id: announcement_speaker
-      - id: media_speaker
-      - id: alert_speaker
+      - id: announcement_mix
+      - id: media_mix
+      - id: alert_mix
+
+  # Mixer and DAC are 48 kHz. Media/announcement pipelines request 48 kHz;
+  # resamplers catch 16 kHz sources (RTTTL / VA audio).
+  - platform: resampler
+    id: announcement_speaker
+    output_speaker: announcement_mix
+    sample_rate: 48000
+    bits_per_sample: 16
+    num_channels: 1
+  - platform: resampler
+    id: media_speaker
+    output_speaker: media_mix
+    sample_rate: 48000
+    bits_per_sample: 16
+    num_channels: 1
+  - platform: resampler
+    id: alert_speaker
+    output_speaker: alert_mix
+    sample_rate: 48000
+    bits_per_sample: 16
+    num_channels: 1
 
 media_player:
   - platform: speaker
@@ -193,27 +235,17 @@ media_player:
     announcement_pipeline:
       speaker: announcement_speaker
       format: FLAC
-      sample_rate: 16000
+      sample_rate: 48000
       num_channels: 1
     media_pipeline:
       speaker: media_speaker
       format: FLAC
-      sample_rate: 16000
+      sample_rate: 48000
       num_channels: 1
     on_announcement:
       - lambda: id(va_active) = false;
-      - if:
-          condition:
-            - microphone.is_capturing:
-          then:
-            - script.execute: stop_wake_word
       - script.execute: reset_led
     on_play:
-      - if:
-          condition:
-            - microphone.is_capturing:
-          then:
-            - script.execute: stop_wake_word
       - script.execute: reset_led
     on_idle:
       - lambda: id(va_active) = false;
@@ -1015,7 +1047,14 @@ script:
               - binary_sensor.is_off: mute_switch
               - switch.is_on: use_wake_word
           then:
-            - micro_wake_word.start
+            # Duplex: MWW already holds the mic during playback. Starting
+            # again overflows the ring buffer.
+            - if:
+                condition:
+                  not:
+                    microphone.is_capturing:
+                then:
+                  - micro_wake_word.start
             - script.execute: reset_led
 
   - id: stop_wake_word
