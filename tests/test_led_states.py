@@ -1,0 +1,592 @@
+"""
+Onju Voice LED State Machine Simulator
+
+Models the firmware's LED logic and verifies correct LED output
+for all combinations of device state. Run with: pytest tests/
+"""
+
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Optional
+import pytest
+
+
+# --- LED model ---
+
+class LedColor(Enum):
+    OFF = "off"
+    ORANGE_SLOW_PULSE = "orange/slow_pulse"       # boot, no wifi
+    GREEN_PULSE = "green/pulse"                     # wifi ok, no HA
+    GREEN_SOLID = "green/solid"                     # connected (brief)
+    PURPLE_TWINKLE = "purple/listening_ww"          # idle, WW active
+    WHITE_LISTENING = "white/listening"              # voice: recording
+    BLUE_PROCESSING = "blue/processing"             # voice: STT+LLM
+    GREEN_SPEAKING = "green/speaking"               # TTS announcement
+    TEAL_PLAYING = "teal/speaking"                  # media playback
+    WHITE_VOLUME = "white/show_volume"              # volume adjust
+    RED_ERROR = "red/solid"                         # error
+    NO_CHANGE = "no_change"                           # va_active: don't touch LEDs
+    ORANGE_TIMER = "orange/show_timer"              # timer countdown bar
+    RED_ALARM = "red/pulse"                         # timer alarm
+    RED_ALARM_CLOCK = "red/fast_blink"              # alarm clock ringing
+
+
+class MediaPlayerState(Enum):
+    IDLE = auto()
+    PLAYING = auto()
+    ANNOUNCING = auto()
+
+
+class VoiceAssistantState(Enum):
+    IDLE = auto()
+    LISTENING = auto()
+    PROCESSING = auto()
+    RESPONDING = auto()  # TTS playing via announcement
+
+
+# --- Device state ---
+
+@dataclass
+class DeviceState:
+    media_player: MediaPlayerState = MediaPlayerState.IDLE
+    voice_assistant: VoiceAssistantState = VoiceAssistantState.IDLE
+    showing_volume: bool = False
+    mute_switch: bool = False       # True = muted
+    use_wake_word: bool = True
+    flicker_wake_word: bool = True
+    music_light: bool = True
+    timer_alarm_active: bool = False
+    active_timer_count: int = 0
+    timer_led: bool = True
+    va_active: bool = False
+    alarm_active: bool = False
+    mic_capturing: bool = False
+
+
+# --- Firmware logic simulation ---
+
+def reset_led(s: DeviceState) -> LedColor:
+    """Simulates the reset_led script from onju-voice.yaml
+
+    Priority: volume > alarm > voice pipeline > music/announcing > timer countdown > wake word > off
+    """
+    # 1. Volume always wins
+    if s.showing_volume:
+        return LedColor.WHITE_VOLUME
+
+    # 2. Alarm clock ringing
+    if s.alarm_active:
+        return LedColor.RED_ALARM_CLOCK
+
+    # 3. Timer alarm
+    if s.timer_alarm_active:
+        return LedColor.RED_ALARM
+
+    # 4. Voice pipeline active — don't overwrite listening/processing/responding LEDs
+    if s.va_active:
+        return LedColor.NO_CHANGE
+
+    # 5. Media playing
+    if s.media_player == MediaPlayerState.PLAYING:
+        if s.music_light:
+            return LedColor.TEAL_PLAYING
+        else:
+            return LedColor.OFF
+
+    # 6. Announcing (TTS)
+    if s.media_player == MediaPlayerState.ANNOUNCING:
+        return LedColor.GREEN_SPEAKING
+
+    # 7. Timer countdown
+    if s.active_timer_count > 0 and s.timer_led:
+        return LedColor.ORANGE_TIMER
+
+    # 8. Wake word idle
+    if s.use_wake_word and s.flicker_wake_word and not s.mute_switch:
+        return LedColor.PURPLE_TWINKLE
+
+    return LedColor.OFF
+
+
+def on_listening(s: DeviceState) -> LedColor:
+    """Voice assistant enters listening state"""
+    s.va_active = True
+    return LedColor.WHITE_LISTENING
+
+
+def on_stt_vad_end(s: DeviceState) -> LedColor:
+    """Voice detected end of speech"""
+    return LedColor.BLUE_PROCESSING
+
+
+def on_announcement(s: DeviceState) -> LedColor:
+    """Media player starts announcement (TTS response)"""
+    s.media_player = MediaPlayerState.ANNOUNCING
+    s.va_active = False
+    return reset_led(s)
+
+
+def on_play(s: DeviceState) -> LedColor:
+    """Media player starts media playback"""
+    s.media_player = MediaPlayerState.PLAYING
+    return reset_led(s)
+
+
+def on_idle_media(s: DeviceState) -> LedColor:
+    """Media player returns to idle"""
+    s.media_player = MediaPlayerState.IDLE
+    s.va_active = False
+    return reset_led(s)
+
+
+def on_error(s: DeviceState) -> LedColor:
+    """Voice assistant error — calls reset_led"""
+    s.va_active = False
+    return reset_led(s)
+
+
+def on_ptt_timeout(s: DeviceState) -> LedColor:
+    """Push-to-talk timeout — stops VA, calls reset_led + start_wake_word"""
+    s.voice_assistant = VoiceAssistantState.IDLE
+    s.va_active = False
+    return reset_led(s)
+
+
+def volume_adjust(s: DeviceState) -> LedColor:
+    """Volume touch pressed"""
+    s.showing_volume = True
+    return LedColor.WHITE_VOLUME
+
+
+def volume_timeout(s: DeviceState) -> LedColor:
+    """Volume display timeout (2s after touch release)"""
+    s.showing_volume = False
+    return reset_led(s)
+
+
+def center_touch(s: DeviceState) -> Optional[LedColor]:
+    """Center touch — stops music if playing, else PTT"""
+    if s.media_player == MediaPlayerState.PLAYING:
+        s.media_player = MediaPlayerState.IDLE
+        # on_idle will fire, which calls reset_led
+        return reset_led(s)
+    elif s.voice_assistant != VoiceAssistantState.IDLE:
+        s.voice_assistant = VoiceAssistantState.IDLE
+        return None  # on_end fires (empty), on_idle handles LED
+    else:
+        s.voice_assistant = VoiceAssistantState.LISTENING
+        return LedColor.WHITE_LISTENING
+
+
+def timer_started(s: DeviceState) -> LedColor:
+    """Timer starts — show countdown if timer_led enabled"""
+    s.active_timer_count += 1
+    return reset_led(s)
+
+def timer_finished(s: DeviceState) -> LedColor:
+    """Timer finishes — alarm starts"""
+    s.active_timer_count = max(0, s.active_timer_count - 1)
+    s.timer_alarm_active = True
+    return reset_led(s)
+
+def timer_cancelled(s: DeviceState) -> LedColor:
+    """Timer cancelled via voice"""
+    s.active_timer_count = max(0, s.active_timer_count - 1)
+    return reset_led(s)
+
+def dismiss_alarm(s: DeviceState) -> LedColor:
+    """User dismisses alarm (center touch or HA)"""
+    s.timer_alarm_active = False
+    return reset_led(s)
+
+
+# --- Tests ---
+
+class TestResetLed:
+    """Test reset_led for all state combinations"""
+
+    def test_volume_always_wins(self):
+        """Volume display takes priority over everything"""
+        for mp in MediaPlayerState:
+            for mute in [True, False]:
+                s = DeviceState(media_player=mp, showing_volume=True, mute_switch=mute)
+                assert reset_led(s) == LedColor.WHITE_VOLUME, \
+                    f"Volume should win over {mp}, mute={mute}"
+
+    def test_playing_with_music_light(self):
+        s = DeviceState(media_player=MediaPlayerState.PLAYING, music_light=True)
+        assert reset_led(s) == LedColor.TEAL_PLAYING
+
+    def test_playing_without_music_light(self):
+        s = DeviceState(media_player=MediaPlayerState.PLAYING, music_light=False)
+        assert reset_led(s) == LedColor.OFF
+
+    def test_announcing(self):
+        s = DeviceState(media_player=MediaPlayerState.ANNOUNCING)
+        assert reset_led(s) == LedColor.GREEN_SPEAKING
+
+    def test_announcing_beats_wake_word(self):
+        """Even with WW active, announcing shows green"""
+        s = DeviceState(
+            media_player=MediaPlayerState.ANNOUNCING,
+            use_wake_word=True, flicker_wake_word=True, mute_switch=False
+        )
+        assert reset_led(s) == LedColor.GREEN_SPEAKING
+
+    def test_idle_ww_active(self):
+        s = DeviceState(use_wake_word=True, flicker_wake_word=True, mute_switch=False)
+        assert reset_led(s) == LedColor.PURPLE_TWINKLE
+
+    def test_idle_ww_disabled(self):
+        s = DeviceState(use_wake_word=False)
+        assert reset_led(s) == LedColor.OFF
+
+    def test_idle_ww_light_off(self):
+        s = DeviceState(use_wake_word=True, flicker_wake_word=False, mute_switch=False)
+        assert reset_led(s) == LedColor.OFF
+
+    def test_idle_muted(self):
+        s = DeviceState(use_wake_word=True, flicker_wake_word=True, mute_switch=True)
+        assert reset_led(s) == LedColor.OFF
+
+
+class TestVoicePipeline:
+    """Test LED states through voice assistant flow"""
+
+    def test_ww_to_listening(self):
+        s = DeviceState()
+        assert on_listening(s) == LedColor.WHITE_LISTENING
+
+    def test_listening_to_processing(self):
+        s = DeviceState(voice_assistant=VoiceAssistantState.LISTENING)
+        assert on_stt_vad_end(s) == LedColor.BLUE_PROCESSING
+
+    def test_processing_to_speaking(self):
+        s = DeviceState(voice_assistant=VoiceAssistantState.PROCESSING)
+        assert on_announcement(s) == LedColor.GREEN_SPEAKING
+
+    def test_speaking_to_idle(self):
+        s = DeviceState(media_player=MediaPlayerState.ANNOUNCING)
+        assert on_idle_media(s) == LedColor.PURPLE_TWINKLE
+
+    def test_full_pipeline_sequence(self):
+        """Simulate complete wake word → response → idle"""
+        s = DeviceState()
+
+        # Idle: purple
+        assert reset_led(s) == LedColor.PURPLE_TWINKLE
+
+        # Wake word detected → listening
+        s.voice_assistant = VoiceAssistantState.LISTENING
+        assert on_listening(s) == LedColor.WHITE_LISTENING
+
+        # Speech ends → processing
+        s.voice_assistant = VoiceAssistantState.PROCESSING
+        assert on_stt_vad_end(s) == LedColor.BLUE_PROCESSING
+
+        # TTS starts → announcing
+        s.voice_assistant = VoiceAssistantState.RESPONDING
+        assert on_announcement(s) == LedColor.GREEN_SPEAKING
+
+        # TTS done → idle
+        s.voice_assistant = VoiceAssistantState.IDLE
+        assert on_idle_media(s) == LedColor.PURPLE_TWINKLE
+
+    def test_ptt_timeout(self):
+        """Push-to-talk with no speech → timeout → idle"""
+        s = DeviceState(voice_assistant=VoiceAssistantState.LISTENING)
+        assert on_ptt_timeout(s) == LedColor.PURPLE_TWINKLE
+
+    def test_ptt_timeout_muted(self):
+        s = DeviceState(voice_assistant=VoiceAssistantState.LISTENING, mute_switch=True)
+        assert on_ptt_timeout(s) == LedColor.OFF
+
+    def test_error_returns_to_idle(self):
+        s = DeviceState(voice_assistant=VoiceAssistantState.LISTENING)
+        assert on_error(s) == LedColor.PURPLE_TWINKLE
+
+
+class TestMediaPlayback:
+    """Test LED states for music playback"""
+
+    def test_play_shows_teal(self):
+        s = DeviceState()
+        assert on_play(s) == LedColor.TEAL_PLAYING
+
+    def test_stop_returns_to_ww(self):
+        s = DeviceState(media_player=MediaPlayerState.PLAYING)
+        assert on_idle_media(s) == LedColor.PURPLE_TWINKLE
+
+    def test_stop_returns_to_off_when_muted(self):
+        s = DeviceState(media_player=MediaPlayerState.PLAYING, mute_switch=True)
+        assert on_idle_media(s) == LedColor.OFF
+
+    def test_center_touch_stops_music(self):
+        s = DeviceState(media_player=MediaPlayerState.PLAYING)
+        led = center_touch(s)
+        assert s.media_player == MediaPlayerState.IDLE
+        assert led == LedColor.PURPLE_TWINKLE
+
+    def test_center_touch_stops_music_muted(self):
+        s = DeviceState(media_player=MediaPlayerState.PLAYING, mute_switch=True)
+        led = center_touch(s)
+        assert led == LedColor.OFF
+
+
+class TestVolumeOverlay:
+    """Test volume display overlay behavior"""
+
+    def test_volume_during_idle(self):
+        s = DeviceState()
+        assert volume_adjust(s) == LedColor.WHITE_VOLUME
+        assert volume_timeout(s) == LedColor.PURPLE_TWINKLE
+
+    def test_volume_during_music(self):
+        s = DeviceState(media_player=MediaPlayerState.PLAYING)
+        assert volume_adjust(s) == LedColor.WHITE_VOLUME
+        # After timeout, should return to teal (not purple!)
+        assert volume_timeout(s) == LedColor.TEAL_PLAYING
+
+    def test_volume_during_music_light_off(self):
+        s = DeviceState(media_player=MediaPlayerState.PLAYING, music_light=False)
+        assert volume_adjust(s) == LedColor.WHITE_VOLUME
+        assert volume_timeout(s) == LedColor.OFF
+
+    def test_volume_during_announcing(self):
+        s = DeviceState(media_player=MediaPlayerState.ANNOUNCING)
+        assert volume_adjust(s) == LedColor.WHITE_VOLUME
+        assert volume_timeout(s) == LedColor.GREEN_SPEAKING
+
+    def test_volume_when_muted(self):
+        s = DeviceState(mute_switch=True)
+        assert volume_adjust(s) == LedColor.WHITE_VOLUME
+        assert volume_timeout(s) == LedColor.OFF
+
+
+class TestMusicInterruption:
+    """Test voice assistant interrupting music"""
+
+    def test_ww_during_music(self):
+        """Wake word during music → listening → process → speak → resume music"""
+        s = DeviceState(media_player=MediaPlayerState.PLAYING)
+
+        # Playing: teal
+        assert reset_led(s) == LedColor.TEAL_PLAYING
+
+        # Wake word → listening (media_player still PLAYING but mic takes I2S)
+        s.voice_assistant = VoiceAssistantState.LISTENING
+        assert on_listening(s) == LedColor.WHITE_LISTENING
+
+        # Processing
+        s.voice_assistant = VoiceAssistantState.PROCESSING
+        assert on_stt_vad_end(s) == LedColor.BLUE_PROCESSING
+
+        # TTS announcement (media_player switches to ANNOUNCING)
+        s.voice_assistant = VoiceAssistantState.RESPONDING
+        s.media_player = MediaPlayerState.ANNOUNCING
+        assert on_announcement(s) == LedColor.GREEN_SPEAKING
+
+        # TTS done → music resumes
+        s.voice_assistant = VoiceAssistantState.IDLE
+        s.media_player = MediaPlayerState.PLAYING
+        assert on_play(s) == LedColor.TEAL_PLAYING
+
+
+class TestMuteSwitch:
+    """Test mute switch behavior"""
+
+    def test_mute_hides_ww_light(self):
+        s = DeviceState(mute_switch=True)
+        assert reset_led(s) == LedColor.OFF
+
+    def test_unmute_shows_ww_light(self):
+        s = DeviceState(mute_switch=False)
+        assert reset_led(s) == LedColor.PURPLE_TWINKLE
+
+    def test_mute_during_music_still_shows_teal(self):
+        """Mute affects wake word LED, not media playback LED"""
+        s = DeviceState(media_player=MediaPlayerState.PLAYING, mute_switch=True, music_light=True)
+        assert reset_led(s) == LedColor.TEAL_PLAYING
+
+
+class TestTimerLed:
+    """Test timer countdown and alarm LED states"""
+
+    def test_timer_shows_orange(self):
+        s = DeviceState()
+        assert timer_started(s) == LedColor.ORANGE_TIMER
+
+    def test_timer_countdown_hidden_when_disabled(self):
+        s = DeviceState(timer_led=False)
+        assert timer_started(s) == LedColor.PURPLE_TWINKLE
+
+    def test_alarm_shows_red(self):
+        s = DeviceState(active_timer_count=1)
+        assert timer_finished(s) == LedColor.RED_ALARM
+
+    def test_dismiss_alarm_returns_to_idle(self):
+        s = DeviceState(timer_alarm_active=True)
+        assert dismiss_alarm(s) == LedColor.PURPLE_TWINKLE
+
+    def test_dismiss_alarm_returns_to_timer_if_others_running(self):
+        s = DeviceState(timer_alarm_active=True, active_timer_count=1)
+        assert dismiss_alarm(s) == LedColor.ORANGE_TIMER
+
+    def test_alarm_during_music(self):
+        """Alarm wins over music"""
+        s = DeviceState(
+            media_player=MediaPlayerState.PLAYING,
+            active_timer_count=1,
+        )
+        assert timer_finished(s) == LedColor.RED_ALARM
+
+    def test_countdown_loses_to_music(self):
+        """Music wins over countdown"""
+        s = DeviceState(media_player=MediaPlayerState.PLAYING, music_light=True)
+        result = timer_started(s)
+        assert result == LedColor.TEAL_PLAYING
+
+    def test_volume_wins_over_alarm(self):
+        s = DeviceState(timer_alarm_active=True, showing_volume=True)
+        assert reset_led(s) == LedColor.WHITE_VOLUME
+
+    def test_cancel_removes_countdown(self):
+        s = DeviceState(active_timer_count=1)
+        assert timer_cancelled(s) == LedColor.PURPLE_TWINKLE
+
+    def test_multiple_timers_one_finishes(self):
+        """Two timers running, one finishes → alarm + one still counting"""
+        s = DeviceState(active_timer_count=2)
+        result = timer_finished(s)
+        assert result == LedColor.RED_ALARM
+        assert s.active_timer_count == 1
+        # After dismiss, countdown for remaining timer
+        assert dismiss_alarm(s) == LedColor.ORANGE_TIMER
+
+    def test_full_timer_lifecycle(self):
+        """Start → countdown → alarm → dismiss → idle"""
+        s = DeviceState()
+        assert reset_led(s) == LedColor.PURPLE_TWINKLE
+
+        assert timer_started(s) == LedColor.ORANGE_TIMER
+        assert timer_finished(s) == LedColor.RED_ALARM
+        assert dismiss_alarm(s) == LedColor.PURPLE_TWINKLE
+
+
+class TestAlarmClockLed:
+    """Alarm clock LED has higher priority than timer alarm."""
+
+    def test_alarm_clock_ringing_shows_red_fast_blink(self):
+        s = DeviceState(alarm_active=True)
+        assert reset_led(s) == LedColor.RED_ALARM_CLOCK
+
+    def test_alarm_clock_beats_timer_alarm(self):
+        s = DeviceState(alarm_active=True, timer_alarm_active=True)
+        assert reset_led(s) == LedColor.RED_ALARM_CLOCK
+
+    def test_alarm_clock_beats_voice_pipeline(self):
+        s = DeviceState(alarm_active=True, va_active=True)
+        assert reset_led(s) == LedColor.RED_ALARM_CLOCK
+
+    def test_alarm_clock_beats_music(self):
+        s = DeviceState(
+            alarm_active=True,
+            media_player=MediaPlayerState.PLAYING,
+            music_light=True,
+        )
+        assert reset_led(s) == LedColor.RED_ALARM_CLOCK
+
+    def test_volume_beats_alarm_clock(self):
+        s = DeviceState(alarm_active=True, showing_volume=True)
+        assert reset_led(s) == LedColor.WHITE_VOLUME
+
+    def test_alarm_not_active_no_effect(self):
+        s = DeviceState(alarm_active=False)
+        assert reset_led(s) != LedColor.RED_ALARM_CLOCK
+
+
+class TestExhaustive:
+    """Exhaustive test: every combination must produce a valid LED state"""
+
+    def test_all_combinations(self):
+        """No combination of core state should produce an unexpected result"""
+        valid_leds = set(LedColor)
+        tested = 0
+
+        for mp in MediaPlayerState:
+            for vol in [True, False]:
+                for mute in [True, False]:
+                    for ww in [True, False]:
+                        for ww_light in [True, False]:
+                            for m_light in [True, False]:
+                                for alarm_clock in [True, False]:
+                                    for alarm in [True, False]:
+                                        for timer_count in [0, 1]:
+                                            for va in [True, False]:
+                                                s = DeviceState(
+                                                    media_player=mp,
+                                                    showing_volume=vol,
+                                                    mute_switch=mute,
+                                                    use_wake_word=ww,
+                                                    flicker_wake_word=ww_light,
+                                                    music_light=m_light,
+                                                    alarm_active=alarm_clock,
+                                                    timer_alarm_active=alarm,
+                                                    active_timer_count=timer_count,
+                                                    va_active=va,
+                                                )
+                                                result = reset_led(s)
+                                                assert result in valid_leds, \
+                                                    f"Invalid LED {result} for state {s}"
+                                                tested += 1
+
+        # 3 × 2 × 2 × 2 × 2 × 2 × 2 × 2 × 2 × 2 = 1536
+        assert tested == 1536
+
+    def test_priority_order(self):
+        """Verify: volume > alarm_clock > timer_alarm > va_active > playing > announcing > timer_countdown > wake_word > off"""
+        s = DeviceState(
+            media_player=MediaPlayerState.PLAYING,
+            showing_volume=True,
+            use_wake_word=True,
+            flicker_wake_word=True,
+            music_light=True,
+            alarm_active=True,
+            timer_alarm_active=True,
+            active_timer_count=1,
+            va_active=True,
+        )
+        # Volume wins
+        assert reset_led(s) == LedColor.WHITE_VOLUME
+
+        # Alarm clock next
+        s.showing_volume = False
+        assert reset_led(s) == LedColor.RED_ALARM_CLOCK
+
+        # Timer alarm next
+        s.alarm_active = False
+        assert reset_led(s) == LedColor.RED_ALARM
+
+        # Voice pipeline next (no-op)
+        s.timer_alarm_active = False
+        assert reset_led(s) == LedColor.NO_CHANGE
+
+        # Music next
+        s.va_active = False
+        assert reset_led(s) == LedColor.TEAL_PLAYING
+
+        # Announcing next
+        s.media_player = MediaPlayerState.ANNOUNCING
+        assert reset_led(s) == LedColor.GREEN_SPEAKING
+
+        # Timer countdown next
+        s.media_player = MediaPlayerState.IDLE
+        assert reset_led(s) == LedColor.ORANGE_TIMER
+
+        # Wake word next
+        s.active_timer_count = 0
+        assert reset_led(s) == LedColor.PURPLE_TWINKLE
+
+        # Off
+        s.use_wake_word = False
+        assert reset_led(s) == LedColor.OFF
