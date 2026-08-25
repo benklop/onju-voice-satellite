@@ -5,7 +5,7 @@ Models valid state transitions and verifies:
 - Media player state machine (idle/playing/announcing)
 - Voice assistant state machine (idle/listening/processing/responding)
 - Wake word control (when MWW starts/stops)
-- I2S bus arbitration (mic XOR speaker)
+- Duplex I2S (mic stays up during playback)
 - Center touch behavior per state
 
 Run with: pytest tests/
@@ -75,10 +75,12 @@ class Device:
     def start_wake_word(self):
         if not self.mute_switch and self.use_wake_word:
             self.mww = MWWState.RUNNING
+            self.mic_capturing = True
             self._log("mww.start")
 
     def stop_wake_word(self):
         self.mww = MWWState.STOPPED
+        self.mic_capturing = False
         self._log("mww.stop")
 
     # --- Triggers ---
@@ -116,9 +118,7 @@ class Device:
         self.voice_assistant = VoiceAssistantState.RESPONDING
         self.media_player = MediaPlayerState.ANNOUNCING
         self.i2s_user = I2SUser.SPEAKER
-        # Firmware: if mic capturing, stop wake word
-        if self.mic_capturing:
-            self.stop_wake_word()
+        # Duplex: playback does not steal the mic / stop MWW
 
     def on_va_end(self):
         """Voice assistant pipeline ends (data sent, NOT speaker done)"""
@@ -146,9 +146,7 @@ class Device:
         self._log("on_play")
         self.media_player = MediaPlayerState.PLAYING
         self.i2s_user = I2SUser.SPEAKER
-        if self.mic_capturing:
-            self.stop_wake_word()
-            self.mic_capturing = False
+        # Duplex: MWW keeps the mic during music
 
     def on_media_stop(self):
         """Media playback stopped (center touch or HA service)"""
@@ -346,6 +344,8 @@ class TestMediaPlaybackTransitions:
         d.on_play_media()
         assert d.media_player == MediaPlayerState.PLAYING
         assert d.i2s_user == I2SUser.SPEAKER
+        assert d.mww == MWWState.RUNNING
+        assert d.mic_capturing is True
 
         d.on_media_stop()
         assert d.media_player == MediaPlayerState.IDLE
@@ -372,13 +372,14 @@ class TestMediaPlaybackTransitions:
 class TestMusicInterruptedByVoice:
 
     def test_wake_word_during_music(self):
-        """Music playing → wake word → voice pipeline → music resumes"""
+        """Music playing → wake word (mic still up) → voice pipeline → music resumes"""
         d = Device()
         d.on_client_connected()
         d.on_play_media()
         assert d.media_player == MediaPlayerState.PLAYING
+        assert d.mww == MWWState.RUNNING
+        assert d.mic_capturing is True
 
-        # Wake word triggers (HA stops music, starts VA)
         d.on_wake_word_detected()
         assert d.voice_assistant == VoiceAssistantState.LISTENING
         assert d.i2s_user == I2SUser.MICROPHONE
@@ -400,53 +401,37 @@ class TestMusicInterruptedByVoice:
         assert d.media_player == MediaPlayerState.PLAYING
 
 
-class TestI2SBusArbitration:
-    """Verify mic and speaker never claim I2S simultaneously"""
+class TestDuplexConcurrency:
+    """Mic and speaker may run together; playback must not stop MWW."""
 
-    def _assert_no_conflict(self, d: Device):
-        """Mic and speaker must not both be active"""
-        if d.mic_capturing:
-            assert d.i2s_user == I2SUser.MICROPHONE, \
-                f"Mic capturing but I2S user is {d.i2s_user}"
-        if d.i2s_user == I2SUser.SPEAKER:
-            assert not d.mic_capturing, \
-                "Speaker active but mic still capturing"
-
-    def test_voice_pipeline_no_conflict(self):
+    def test_play_keeps_wake_word(self):
         d = Device()
         d.on_client_connected()
-        self._assert_no_conflict(d)
-
-        d.on_wake_word_detected()
-        self._assert_no_conflict(d)  # mic active
-
-        d.on_stt_vad_end()
-        self._assert_no_conflict(d)  # neither
-
-        d.on_tts_response()
-        self._assert_no_conflict(d)  # speaker active
-
-        d.on_media_idle()
-        self._assert_no_conflict(d)  # neither
-
-    def test_music_no_conflict(self):
-        d = Device()
-        d.on_play_media()
-        self._assert_no_conflict(d)  # speaker
-
-        d.on_media_stop()
-        self._assert_no_conflict(d)  # neither
-
-    def test_play_stops_mic(self):
-        """If mic is capturing when music starts, mic must stop"""
-        d = Device()
-        d.on_client_connected()
-        d.on_wake_word_detected()
+        assert d.mww == MWWState.RUNNING
         assert d.mic_capturing is True
 
         d.on_play_media()
-        assert d.mic_capturing is False
+        assert d.mww == MWWState.RUNNING
+        assert d.mic_capturing is True
         assert d.i2s_user == I2SUser.SPEAKER
+
+    def test_announcement_keeps_wake_word(self):
+        d = Device()
+        d.on_client_connected()
+        d.on_tts_response()
+        assert d.mww == MWWState.RUNNING
+        assert d.mic_capturing is True
+        assert d.i2s_user == I2SUser.SPEAKER
+
+    def test_voice_pipeline_still_stops_mww_on_wake(self):
+        """VA start still takes the wake-word engine; duplex does not change that."""
+        d = Device()
+        d.on_client_connected()
+        d.on_play_media()
+        d.on_wake_word_detected()
+        assert d.mww == MWWState.STOPPED
+        assert d.mic_capturing is True
+        assert d.i2s_user == I2SUser.MICROPHONE
 
 
 class TestWakeWordControl:
@@ -764,7 +749,7 @@ class TestAlarmClockLifecycle:
         assert d.alarm_enabled is True
 
     def test_alarm_ring_stops_wake_word(self):
-        """Alarm ring must stop MWW (shared I2S bus)"""
+        """Alarm ring still stops MWW (exclusive attention, not a bus limit)"""
         d = Device(use_wake_word=True)
         d.on_client_connected()
         assert d.mww == MWWState.RUNNING

@@ -264,22 +264,13 @@ The `Timer Status` text sensor reports:
 
 The Onju Voice appears as a standard Home Assistant media player. You can stream audio to it from any HA integration that supports media players — Music Assistant, Spotify, TTS, media browser, etc.
 
-### I2S bus limitation
+### Duplex playback
 
-The Onju Voice PCB has a shared I2S bus for the microphone and speaker. This means:
+The mic stays up while music or TTS plays. Say the wake word during playback; you do not have to tap first.
 
-- Wake word detection **pauses** during audio playback
-- The device cannot listen and play simultaneously
-- When playback stops, wake word detection resumes automatically
+Software echo cancellation (ESP-SR) is on the mic path. It is not an XMOS chip: barge-in works, wake word during loud music is not guaranteed. If it misses, tap the center pad — that still stops music and starts listening.
 
-### Voice assistant during playback
-
-You can still use the voice assistant while music is playing:
-
-1. **Tap the center touch pad** — music pauses, the device listens for your command
-2. **Speak your command** — audio is streamed to HA for processing
-3. **TTS response plays** — the assistant's response is played
-4. **Music resumes** — playback continues automatically when the pipeline finishes
+Alarms still pause wake word until you dismiss or snooze.
 
 ### Music playback light
 

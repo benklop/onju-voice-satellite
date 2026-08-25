@@ -373,7 +373,7 @@ class TestMusicInterruption:
         # Playing: teal
         assert reset_led(s) == LedColor.TEAL_PLAYING
 
-        # Wake word → listening (media_player still PLAYING but mic takes I2S)
+        # Wake word → listening (media_player still PLAYING; duplex keeps the mic)
         s.voice_assistant = VoiceAssistantState.LISTENING
         assert on_listening(s) == LedColor.WHITE_LISTENING
 

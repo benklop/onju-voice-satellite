@@ -2,15 +2,15 @@
 
 ESPHome firmware that turns an [Onju Voice](https://github.com/justLV/onju-voice) PCB (a drop-in replacement board for a 2nd generation Google Nest Mini) into a Home Assistant voice satellite.
 
-This repository is a maintenance fork of [tetele/onju-voice-satellite](https://github.com/tetele/onju-voice-satellite). The firmware itself is [Idskov/onju-voice-esphome v1.5.1](https://github.com/Idskov/onju-voice-esphome) — native ESPHome, microWakeWord, no abandoned audio libraries.
+This repository is a maintenance fork of [tetele/onju-voice-satellite](https://github.com/tetele/onju-voice-satellite). The product layer is [Idskov/onju-voice-esphome v1.5.1](https://github.com/Idskov/onju-voice-esphome); duplex I2S is [n-IA-hane/esphome-audio-stack](https://github.com/n-IA-hane/esphome-audio-stack).
 
 ## Status
 
-| Now | Next | After that |
-|-----|------|------------|
-| Working on-device wake word on current ESPHome | Full duplex (mic stays up during playback) | ESP-SR software echo cancellation |
+| Now | Next |
+|-----|------|
+| Full duplex: mic stays up during playback | AEC calibration (channel, filter, gains) — software AEC is not XMOS |
 
-The PCB has a **shared I2S bus**. Wake word listening pauses during playback. That is handled in firmware; duplex and AEC are the follow-on work.
+One `esp_audio_stack` owns the shared I2S bus so the MEMS mic and amp run together. ESP-SR software AEC is wired so wake-word-during-music is usable; loud music can still mask the wake word — tap the center pad if it misses.
 
 Guides for alarms, wake words, music, and touch controls: **[User Manual](MANUAL.md)**.
 
@@ -18,7 +18,7 @@ Guides for alarms, wake words, music, and touch controls: **[User Manual](MANUAL
 
 - Onju Voice PCB installed in a Google Nest Mini (2nd gen)
 - Home Assistant 2024.7.0 or newer, with a voice assistant pipeline (STT + TTS)
-- ESPHome **2026.2.0** or newer
+- ESPHome **2026.5.0** or newer
 - First flash over USB (BOOT button held). Later updates are OTA.
 
 If you are upgrading from tetele's Arduino-based config, OTA will likely fail because the framework is now ESP-IDF. USB flash once, OTA after that.
@@ -83,6 +83,7 @@ Notification sounds in `res/` are [CC BY 4.0](https://creativecommons.org/licens
 - [Justin Alvey](https://github.com/justLV) — Onju Voice PCB
 - [Tudor Sandu](https://github.com/tetele) — original ESPHome satellite config
 - [Nico Idskov](https://github.com/Idskov) — native ESPHome rewrite this tree is based on
-- [Roy Meissner](https://github.com/rmeissn) — duplex I2S + software AEC work we will port next
+- [Roy Meissner](https://github.com/rmeissn) — proven Onju duplex + software AEC recipe this tree ports
+- [n-IA-hane](https://github.com/n-IA-hane/esphome-audio-stack) — `esp_audio_stack` / `esp_aec` backend
 - [Kevin Ahrendt](https://github.com/kahrendt) — microWakeWord
 - Home Assistant / ESPHome voice teams
