@@ -2,7 +2,7 @@
 
 ## Automated Tests
 
-The `tests/` directory contains Python simulations of the firmware's state machines. These catch regressions in LED logic, state transitions, and bus arbitration without needing hardware.
+The `tests/` directory contains Python simulations of the firmware's state machines. These catch regressions in LED logic, state transitions, and duplex wake-word behavior without needing hardware.
 
 ```bash
 pip install pytest
@@ -14,7 +14,7 @@ pytest tests/ -v
 | Test file | What it models |
 |-----------|----------------|
 | `test_led_states.py` | LED output for all 1,536 state combinations, priority order (volume > alarm clock > timer alarm > voice pipeline > playing > announcing > timer countdown > wake word > off), full pipeline sequences, volume overlay behavior |
-| `test_state_transitions.py` | Media player + voice assistant state machines, wake word start/stop logic, I2S bus arbitration (mic XOR speaker), center touch behavior per state |
+| `test_state_transitions.py` | Media player + voice assistant state machines, wake word start/stop logic, duplex (MWW stays running during playback), center touch behavior per state |
 
 ### When to run
 
@@ -60,8 +60,10 @@ Automated tests verify logic correctness but cannot confirm physical behavior (L
 - [ ] Music stops, LED returns to purple
 
 **Voice interrupts music** (wake word during playback)
+- [ ] Wake word is heard while music plays (no center tap)
 - [ ] Music pauses → voice pipeline runs → music resumes
 - [ ] LED: teal → white → blue → green → teal
+- [ ] If wake word misses during loud music, center tap still starts listening
 
 **Mute switch**
 - [ ] ON: LED off, wake word disabled
