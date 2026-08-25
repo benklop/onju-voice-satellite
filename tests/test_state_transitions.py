@@ -74,13 +74,19 @@ class Device:
 
     def start_wake_word(self):
         if not self.mute_switch and self.use_wake_word:
+            # Firmware skips micro_wake_word.start while the mic is already up
+            # (duplex playback or VA/PTT) to avoid overflowing the ring buffer.
+            if self.mic_capturing:
+                return
             self.mww = MWWState.RUNNING
             self.mic_capturing = True
             self._log("mww.start")
 
     def stop_wake_word(self):
         self.mww = MWWState.STOPPED
-        self.mic_capturing = False
+        # Firmware only calls micro_wake_word.stop; VA/PTT may still own the mic.
+        if self.voice_assistant != VoiceAssistantState.LISTENING:
+            self.mic_capturing = False
         self._log("mww.stop")
 
     # --- Triggers ---
@@ -130,6 +136,8 @@ class Device:
         self._log("on_error")
         self.va_active = False
         self.voice_assistant = VoiceAssistantState.IDLE
+        # VA releases the mic before on_error runs start_wake_word.
+        self.mic_capturing = False
         self.start_wake_word()
 
     def on_media_idle(self):
@@ -493,6 +501,44 @@ class TestWakeWordControl:
         d = Device(use_wake_word=False)
         d.on_client_connected()
         assert d.mww == MWWState.STOPPED
+
+    def test_start_skips_when_mic_already_capturing(self):
+        """Firmware does not re-start MWW while the mic is already up."""
+        d = Device()
+        d.on_client_connected()
+        assert d.log.count("mww.start") == 1
+        d.on_play_media()
+        d.start_wake_word()
+        assert d.log.count("mww.start") == 1
+        assert d.mww == MWWState.RUNNING
+
+    def test_start_does_not_restart_while_va_holds_mic(self):
+        d = Device()
+        d.on_client_connected()
+        d.on_wake_word_detected()
+        assert d.mww == MWWState.STOPPED
+        assert d.mic_capturing is True
+        d.start_wake_word()
+        assert d.mww == MWWState.STOPPED
+        assert d.log.count("mww.start") == 1
+
+    def test_stop_keeps_mic_when_va_listening(self):
+        """Mute/disconnect must not claim the VA mic stopped."""
+        d = Device()
+        d.on_client_connected()
+        d.center_touch()
+        assert d.voice_assistant == VoiceAssistantState.LISTENING
+        assert d.mic_capturing is True
+        d.toggle_mute(True)
+        assert d.mww == MWWState.STOPPED
+        assert d.mic_capturing is True
+
+    def test_stop_clears_mic_when_idle(self):
+        d = Device()
+        d.on_client_connected()
+        d.stop_wake_word()
+        assert d.mww == MWWState.STOPPED
+        assert d.mic_capturing is False
 
 
 class TestCenterTouchBehavior:

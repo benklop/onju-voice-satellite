@@ -200,7 +200,8 @@ speaker:
       - id: media_mix
       - id: alert_mix
 
-  # Mixer and DAC are 48 kHz; pipelines and RTTTL may arrive at 16 kHz.
+  # Mixer and DAC are 48 kHz. Media/announcement pipelines request 48 kHz;
+  # resamplers catch 16 kHz sources (RTTTL / VA audio).
   - platform: resampler
     id: announcement_speaker
     output_speaker: announcement_mix
