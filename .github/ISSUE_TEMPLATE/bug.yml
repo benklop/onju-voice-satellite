@@ -6,15 +6,11 @@ body:
   - type: markdown
     attributes:
       value: Before you open a new issue, search through the existing issues to see if others have had the same problem.
-  - type: dropdown
+  - type: input
     attributes:
-      label: Flavor
-      description: What flavor of the config are you running?
-      multiple: false
-      options:
-        - OpenWakeWord or no wake word
-        - MicroWakeWord
-      default: 0
+      label: ESPHome version
+      description: The ESPHome version you compiled with (2.0 firmware needs 2026.2.0 or newer).
+      placeholder: "2026.8.1"
     validations:
       required: true
   - type: checkboxes
@@ -23,7 +19,7 @@ body:
       options:
         - label: This issue only contains 1 issue (if you have multiple issues, open one issue for each issue).
           required: true
-        - label: This issue is not a duplicate issue of currently [previous issues](https://github.com/tetele/onju-voice-satellite/issues?q=is%3Aissue+label%3A%22bug%22+)..
+        - label: This issue is not a duplicate of a [previous issue](https://github.com/benklop/onju-voice-satellite/issues?q=is%3Aissue+label%3A%22bug%22+).
           required: true
         - label: I am able to consult debug logging for my ESPHome instance.
           required: false

@@ -1,20 +1,29 @@
+# Onju Voice Satellite — Native ESPHome config
+# A drop-in ESPHome firmware for the Onju Voice PCB that turns a
+# Google Nest Mini (2nd gen) into a Home Assistant voice satellite.
+#
+# Based on Idskov/onju-voice-esphome v1.5.1 (6b1809d). Native ESPHome
+# components only — no gnumpi/esphome_audio, no Arduino framework.
+#
+# Hardware: Onju Voice PCB (ESP32-S3) by justLV
+#   I2S: LRCLK=GPIO13, BCLK=GPIO18, DOUT=GPIO12, DIN=GPIO17
+#   LEDs: GPIO11 (6x SK6812)
+#   Touch: GPIO4 (vol-), GPIO3 (action), GPIO2 (vol+)
+#   Mute: GPIO38 (pull-up)
+#   DAC mute: GPIO21 (active low)
+
 substitutions:
-  name: "onju-voice"
-  friendly_name: "Onju Voice Satellite"
-  project_version: "1.1.0"
-  device_description: "Onju Voice Satellite with ESPHome software"
-  error_sound_url: "https://github.com/tetele/onju-voice-satellite/raw/main/res/error.mp3" # Error #8 by UNIVERSFIELD https://freesound.org/people/UNIVERSFIELD/sounds/734442/
-  timer_finished_sound_url: "https://github.com/tetele/onju-voice-satellite/raw/main/res/timer_finished.mp3" # New Notification #6 by UNIVERSFIELD https://freesound.org/people/UNIVERSFIELD/sounds/734445/
+  name: onju-voice
+  friendly_name: Onju Voice
 
 esphome:
-  name: "${name}"
-  friendly_name: "${friendly_name}"
-  comment: "${device_description}"
+  name: ${name}
   name_add_mac_suffix: true
+  friendly_name: ${friendly_name}
+  min_version: 2026.2.0
   project:
-    name: tetele.onju_voice_satellite
-    version: "${project_version}"
-  min_version: 2024.7.3
+    name: benklop.onju_voice_satellite
+    version: "2.0.0"
   platformio_options:
     board_build.flash_mode: dio
     board_build.arduino.memory_type: qio_opi
@@ -48,121 +57,208 @@ esphome:
       - script.execute: reset_led
 
 dashboard_import:
-  package_import_url: github://tetele/onju-voice-satellite/esphome/onju-voice.yaml@main
+  package_import_url: github://benklop/onju-voice-satellite/esphome/onju-voice.yaml@main
 
 esp32:
   board: esp32-s3-devkitc-1
   framework:
-    type: arduino
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
 
 psram:
   mode: octal
   speed: 80MHz
 
-# Enable logging
 logger:
 
-# Allow OTA updates
 ota:
-  platform: esphome
+  - platform: esphome
+  - platform: http_request
+  - platform: web_server
 
-# Allow provisioning Wi-Fi via serial
+http_request:
+  buffer_size_rx: 4096
+  buffer_size_tx: 2048
+
+web_server:
+  port: 80
+  include_internal: false
+
 improv_serial:
 
 wifi:
-  # Set up a wifi access point
   ap:
     ssid: "${friendly_name}"
 
-# In combination with the `ap` this allows the user
-# to provision wifi credentials to the device via WiFi AP.
 captive_portal:
 
 api:
   services:
-    - service: start_va
-      then:
-        - voice_assistant.start
-    - service: stop_va
-      then:
-        - voice_assistant.stop
-    - service: notification_on
-      then:
-        - script.execute: turn_on_notification
-    - service: notification_clear
-      then:
-        - script.execute: clear_notification
-
-globals:
-  - id: thresh_percent
-    type: float
-    initial_value: "0.03"
-    restore_value: false
-  - id: touch_calibration_values_left
-    type: uint32_t[5]
-    restore_value: false
-  - id: touch_calibration_values_center
-    type: uint32_t[5]
-    restore_value: false
-  - id: touch_calibration_values_right
-    type: uint32_t[5]
-    restore_value: false
-  - id: notification
-    type: bool
-    restore_value: false
-
-interval:
-  - interval: 1s
-    then:
-      - script.execute:
-          id: calibrate_touch
-          button: 0
-      - script.execute:
-          id: calibrate_touch
-          button: 1
-      - script.execute:
-          id: calibrate_touch
-          button: 2
-
-i2s_audio:
-  - i2s_lrclk_pin: GPIO13
-    i2s_bclk_pin: GPIO18
-
-media_player:
-  - platform: i2s_audio
-    name: None
-    id: onju_out
-    dac_type: external
-    i2s_dout_pin: GPIO12
-    mode: mono
-    mute_pin:
-      number: GPIO21
-      inverted: True
-    on_state:
+    - service: set_alarm
+      variables:
+        hour: int
+        minute: int
       then:
         - lambda: |-
-            static float old_volume = -1;
-            float new_volume = id(onju_out).volume;
-            if(abs(new_volume-old_volume) > 0.0001) {
-              if(old_volume != -1) {
-                id(show_volume)->execute();
+            int h = std::max(0, std::min(23, (int)hour));
+            int m = std::max(0, std::min(59, (int)minute));
+            auto call_h = id(alarm_hour).make_call();
+            call_h.set_value(h);
+            call_h.perform();
+            auto call_m = id(alarm_minute).make_call();
+            call_m.set_value(m);
+            call_m.perform();
+        - switch.turn_on: alarm_enabled
+        - script.execute: alarm_confirm
+
+    - service: cancel_alarm
+      then:
+        - switch.turn_off: alarm_enabled
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time:
+      - seconds: 0
+        minutes: '*'
+        then:
+          - lambda: |-
+              // Guard: skip if time not yet synced from HA
+              if (id(ha_time).now().year < 2025) return;
+              auto now = id(ha_time).now();
+              int h = now.hour;
+              int m = now.minute;
+              // Normal alarm check
+              if (id(alarm_enabled).state && !id(alarm_active) && !id(alarm_snoozed)) {
+                if (h == (int)id(alarm_hour).state && m == (int)id(alarm_minute).state) {
+                  id(alarm_ring).execute();
+                }
               }
-            }
-            old_volume = new_volume;
+              // Snooze re-trigger check
+              if (id(alarm_snoozed) && !id(alarm_active)) {
+                if (h == id(alarm_snooze_target_hour) && m == id(alarm_snooze_target_min)) {
+                  id(alarm_ring).execute();
+                }
+              }
+
+# --- Audio ---
+# The Onju Voice has a shared I2S bus for both microphone and speaker.
+# They cannot run simultaneously — ESPHome handles bus arbitration via
+# the media_player wrapper.
+
+i2s_audio:
+  - id: i2s_shared
+    i2s_lrclk_pin: GPIO13
+    i2s_bclk_pin: GPIO18
 
 microphone:
   - platform: i2s_audio
-    id: onju_microphone
+    id: onju_mic
+    i2s_audio_id: i2s_shared
     i2s_din_pin: GPIO17
     adc_type: external
-    pdm: false
+    channel: left
+    sample_rate: 16000
+    bits_per_sample: 32bit
+
+speaker:
+  - platform: i2s_audio
+    id: i2s_speaker
+    i2s_audio_id: i2s_shared
+    i2s_dout_pin: GPIO12
+    dac_type: external
+    channel: left
+    sample_rate: 16000
+    bits_per_sample: 32bit
+    buffer_duration: 100ms
+
+  - platform: mixer
+    id: onju_mixer
+    output_speaker: i2s_speaker
+    queue_mode: true
+    source_speakers:
+      - id: announcement_speaker
+      - id: media_speaker
+      - id: alert_speaker
+
+media_player:
+  - platform: speaker
+    name: None
+    id: onju_media_player
+    task_stack_in_psram: true
+    volume_increment: 0.05
+    volume_min: 0.0
+    volume_max: 1.0
+    announcement_pipeline:
+      speaker: announcement_speaker
+      format: FLAC
+      sample_rate: 16000
+      num_channels: 1
+    media_pipeline:
+      speaker: media_speaker
+      format: FLAC
+      sample_rate: 16000
+      num_channels: 1
+    on_announcement:
+      - lambda: id(va_active) = false;
+      - if:
+          condition:
+            - microphone.is_capturing:
+          then:
+            - script.execute: stop_wake_word
+      - script.execute: reset_led
+    on_play:
+      - if:
+          condition:
+            - microphone.is_capturing:
+          then:
+            - script.execute: stop_wake_word
+      - script.execute: reset_led
+    on_idle:
+      - lambda: id(va_active) = false;
+      - script.execute: start_wake_word
+      - script.execute: reset_led
+
+# --- Alerts (RTTTL) ---
+# Routes through alert_speaker in the mixer.
+# Timer alarm queues behind active audio via mixer queue_mode.
+
+rtttl:
+  id: buzzer
+  speaker: alert_speaker
+  gain: 0.8
+
+# --- Wake word (on-device) ---
+
+micro_wake_word:
+  id: mww
+  models:
+    - model: okay_nabu
+    - model: hey_jarvis
+  on_wake_word_detected:
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+# --- Voice Assistant ---
 
 voice_assistant:
   id: va
-  microphone: onju_microphone
-  media_player: onju_out
-  use_wake_word: true
+  microphone: onju_mic
+  media_player: onju_media_player
+  micro_wake_word: mww
+  noise_suppression_level: 4
+  auto_gain: 31dBFS
+  volume_multiplier: 2.0
+
+  on_client_connected:
+    - script.execute: start_wake_word
+  on_client_disconnected:
+    - script.execute: stop_wake_word
+
   on_listening:
+    - lambda: id(va_active) = true;
+    - script.execute: push_to_talk_timeout
     - light.turn_on:
         id: top_led
         blue: 100%
@@ -170,7 +266,9 @@ voice_assistant:
         green: 100%
         brightness: 100%
         effect: listening
+
   on_stt_vad_end:
+    - script.stop: push_to_talk_timeout
     - light.turn_on:
         id: top_led
         blue: 100%
@@ -178,189 +276,63 @@ voice_assistant:
         green: 20%
         brightness: 70%
         effect: processing
-  on_tts_end:
-    - media_player.play_media: !lambda return x;
-    - light.turn_on:
-        id: top_led
-        blue: 0%
-        red: 20%
-        green: 100%
-        effect: speaking
+
   on_end:
-    - delay: 100ms
-    - wait_until:
-        not:
-          media_player.is_playing: onju_out
-    - script.execute: reset_led
-  on_timer_started:
-    - light.turn_on:
-        id: top_led
-        effect: random_twinkle
-  on_timer_finished:
-    - media_player.play_media: "${timer_finished_sound_url}"
-    - light.turn_on:
-        id: top_led
-        blue: 0%
-        red: 100%
-        green: 80%
-        effect: slow_pulse
-    - delay: 5s
-    - script.execute: reset_led
-  on_client_connected:
-    - if:
-        condition:
-          and:
-            - switch.is_on: use_wake_word
-            - binary_sensor.is_off: mute_switch
-        then:
-          - voice_assistant.start_continuous:
-  on_client_disconnected:
-    - if:
-        condition:
-          and:
-            - switch.is_on: use_wake_word
-            - binary_sensor.is_off: mute_switch
-        then:
-          - voice_assistant.stop:
+    # Don't reset LED or restart MWW here.
+    # on_idle in media_player handles both after speaker finishes.
+    []
+
   on_error:
-    - media_player.play_media: "${error_sound_url}"
-    - light.turn_on:
-        id: top_led
-        blue: 0%
-        red: 100%
-        green: 0%
-        effect: none
-    - delay: 1s
+    - lambda: id(va_active) = false;
+    - script.execute: reset_led
+    - script.execute: start_wake_word
+
+  on_timer_started:
+    - lambda: |-
+        id(active_timer_count) += 1;
+        id(timer_status).publish_state("active");
     - script.execute: reset_led
 
-number:
-  - platform: template
-    name: "Touch threshold percentage"
-    id: touch_threshold_percentage
-    update_interval: never
-    entity_category: config
-    initial_value: 0.75
-    min_value: 0.25
-    max_value: 5
-    step: 0.05
-    optimistic: true
-    on_value:
-      then:
-        - lambda: !lambda |-
-            id(thresh_percent) = 0.01 * x;
+  on_timer_finished:
+    - lambda: |-
+        id(active_timer_count) = std::max(0, id(active_timer_count) - 1);
+    - if:
+        condition:
+          lambda: return id(active_timer_count) == 0;
+        then:
+          - lambda: id(timer_status).publish_state("ringing");
+        else:
+          - lambda: id(timer_status).publish_state("ringing");
+    - script.execute: timer_alarm
 
-esp32_touch:
-  setup_mode: false
-  sleep_duration: 2ms
-  measurement_duration: 800us
-  low_voltage_reference: 0.8V
-  high_voltage_reference: 2.4V
+  on_timer_cancelled:
+    - lambda: |-
+        id(active_timer_count) = std::max(0, id(active_timer_count) - 1);
+    - if:
+        condition:
+          lambda: return id(active_timer_count) == 0;
+        then:
+          - lambda: id(timer_status).publish_state("idle");
+    - script.execute: reset_led
 
-  filter_mode: IIR_16
-  debounce_count: 2
-  noise_threshold: 0
-  jitter_step: 0
-  smooth_mode: IIR_2
+  on_timer_tick:
+    - lambda: |-
+        auto active_timers = id(va).get_timers();
+        if (active_timers.empty()) return;
+        uint32_t min_remaining = UINT32_MAX;
+        for (const auto &t : active_timers) {
+          if (t.seconds_left < min_remaining) {
+            min_remaining = t.seconds_left;
+          }
+        }
+        int m = min_remaining / 60;
+        int s = min_remaining % 60;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "active:%02d:%02d", m, s);
+        id(timer_status).publish_state(buf);
+    - script.execute: reset_led
 
-  denoise_grade: BIT8
-  denoise_cap_level: L0
-
-binary_sensor:
-  - platform: esp32_touch
-    id: volume_down
-    pin: GPIO4
-    threshold: 539000
-    on_press:
-      then:
-        - light.turn_on: left_led
-        - script.execute:
-            id: set_volume
-            volume: -0.05
-        - delay: 750ms
-        - while:
-            condition:
-              binary_sensor.is_on: volume_down
-            then:
-              - script.execute:
-                  id: set_volume
-                  volume: -0.05
-              - delay: 150ms
-    on_release:
-      then:
-        - light.turn_off: left_led
-
-  - platform: esp32_touch
-    id: volume_up
-    pin: GPIO2
-    threshold: 580000
-    on_press:
-      then:
-        - light.turn_on: right_led
-        - script.execute:
-            id: set_volume
-            volume: 0.05
-        - delay: 750ms
-        - while:
-            condition:
-              binary_sensor.is_on: volume_up
-            then:
-              - script.execute:
-                  id: set_volume
-                  volume: 0.05
-              - delay: 150ms
-    on_release:
-      then:
-        - light.turn_off: right_led
-
-  - platform: esp32_touch
-    id: action
-    pin: GPIO3
-    threshold: 751000
-    on_click:
-      - if:
-          condition:
-            or:
-              - switch.is_off: use_wake_word
-              - binary_sensor.is_on: mute_switch
-          then:
-            - logger.log:
-                tag: "action_click"
-                format: "Voice assistant is running: %s"
-                args: ['id(va).is_running() ? "yes" : "no"']
-            - if:
-                condition: media_player.is_playing
-                then:
-                  - media_player.stop
-            - if:
-                condition: voice_assistant.is_running
-                then:
-                  - voice_assistant.stop:
-                else:
-                  - voice_assistant.start:
-          else:
-            - logger.log:
-                tag: "action_click"
-                format: "Voice assistant was running with wake word detection enabled. Starting continuously"
-            - if:
-                condition: media_player.is_playing
-                then:
-                  - media_player.stop
-            - voice_assistant.stop
-            - delay: 1s
-            - script.execute: reset_led
-            - script.wait: reset_led
-            - voice_assistant.start_continuous:
-
-  - platform: gpio
-    id: mute_switch
-    pin:
-      number: GPIO38
-      mode: INPUT_PULLUP
-    name: Disable wake word
-    on_press:
-      - script.execute: turn_off_wake_word
-    on_release:
-      - script.execute: turn_on_wake_word
+# --- LEDs (6x SK6812) ---
 
 light:
   - platform: esp32_rmt_led_strip
@@ -369,9 +341,9 @@ light:
     chipset: SK6812
     num_leds: 6
     rgb_order: grb
-    rmt_channel: 0
     default_transition_length: 0s
     gamma_correct: 2.8
+
   - platform: partition
     id: left_led
     segments:
@@ -379,6 +351,7 @@ light:
         from: 0
         to: 0
     default_transition_length: 100ms
+
   - platform: partition
     id: top_led
     segments:
@@ -392,26 +365,13 @@ light:
           transition_length: 250ms
           update_interval: 250ms
       - pulse:
+          name: fast_blink
+          transition_length: 100ms
+          update_interval: 200ms
+      - pulse:
           name: slow_pulse
           transition_length: 1s
           update_interval: 2s
-      - addressable_lambda:
-          name: show_volume
-          update_interval: 50ms
-          lambda: |-
-            int int_volume = int(id(onju_out).volume * 100.0f * it.size());
-            int full_leds = int_volume / 100;
-            int last_brightness = int_volume % 100;
-            int i = 0;
-            for(; i < full_leds; i++) {
-              it[i] = Color::WHITE;
-            }
-            if(i < 4) {
-              it[i++] = Color(64, 64, 64).fade_to_white(last_brightness*256/100);
-            }
-            for(; i < it.size(); i++) {
-              it[i] = Color(64, 64, 64);
-            }
       - addressable_twinkle:
           name: listening_ww
           twinkle_probability: 1%
@@ -424,9 +384,54 @@ light:
       - addressable_flicker:
           name: speaking
           intensity: 35%
-      - addressable_random_twinkle:
-          name: random_twinkle
-          twinkle_probability: 45%
+      - addressable_lambda:
+          name: show_volume
+          update_interval: 50ms
+          lambda: |-
+            int int_volume = int(id(onju_media_player).volume * 100.0f * it.size());
+            int full_leds = int_volume / 100;
+            int last_brightness = int_volume % 100;
+            int i = 0;
+            for(; i < full_leds; i++) {
+              it[i] = Color::WHITE;
+            }
+            if(i < 4) {
+              it[i++] = Color(64, 64, 64).fade_to_white(last_brightness*256/100);
+            }
+            for(; i < it.size(); i++) {
+              it[i] = Color(64, 64, 64);
+            }
+
+      - addressable_lambda:
+          name: show_timer
+          update_interval: 1000ms
+          lambda: |-
+            auto timers = id(va).get_timers();
+            if (timers.empty()) return;
+            uint32_t min_remaining = UINT32_MAX;
+            uint32_t min_total = 1;
+            for (const auto &t : timers) {
+              if (t.seconds_left < min_remaining) {
+                min_remaining = t.seconds_left;
+                min_total = t.total_seconds;
+              }
+            }
+            float fraction = min_total > 0 ? float(min_remaining) / float(min_total) : 0.0f;
+            // Proportional: map fraction to LEDs + brightness on partial LED
+            float led_value = fraction * it.size();
+            int full_leds = int(led_value);
+            float partial = led_value - full_leds;
+            for (int i = 0; i < it.size(); i++) {
+              if (i < full_leds) {
+                it[i] = Color(255, 140, 0);
+              } else if (i == full_leds) {
+                uint8_t br = uint8_t(partial * 255);
+                it[i] = Color(br, br * 140 / 255, 0);
+              } else {
+                it[i] = Color(0, 0, 0);
+              }
+            }
+
   - platform: partition
     id: right_led
     segments:
@@ -435,181 +440,134 @@ light:
         to: 5
     default_transition_length: 100ms
 
-script:
-  - id: reset_led
-    then:
-      - if:
-          condition:
-            - lambda: return id(notification);
-          then:
-            - light.turn_on:
-                id: top_led
-                blue: 100%
-                red: 100%
-                green: 0%
-                brightness: 100%
-                effect: slow_pulse
-          else:
-            - if:
-                condition:
-                  and:
-                    - switch.is_on: use_wake_word
-                    - switch.is_on: flicker_wake_word
-                    - binary_sensor.is_off: mute_switch
-                then:
-                  - light.turn_on:
-                      id: top_led
-                      blue: 100%
-                      red: 100%
-                      green: 0%
-                      brightness: 60%
-                      effect: listening_ww
-                else:
-                  - light.turn_off: top_led
+# --- Touch controls ---
+# ESP32-S3 touch threshold is a delta value (not absolute) in ESP-IDF 5.x.
+# 2000 works well for the Nest Mini's capacitive top panel.
 
-  - id: turn_on_notification
-    then:
-      - lambda: id(notification) = true;
-      - script.execute: reset_led
+esp32_touch:
+  setup_mode: false
+  measurement_duration: 0.25ms
+  sleep_duration: 2ms
 
-  - id: clear_notification
-    then:
-      - lambda: id(notification) = false;
-      - script.execute: reset_led
+binary_sensor:
+  - platform: esp32_touch
+    id: volume_down
+    pin: GPIO4
+    threshold: 2000
+    on_press:
+      then:
+        - light.turn_on: left_led
+        - script.execute:
+            id: adjust_volume
+            delta: -0.05
+        - delay: 750ms
+        - while:
+            condition:
+              binary_sensor.is_on: volume_down
+            then:
+              - script.execute:
+                  id: adjust_volume
+                  delta: -0.05
+              - delay: 150ms
+    on_release:
+      then:
+        - light.turn_off: left_led
+        - script.execute: show_volume_then_restore
 
-  - id: set_volume
-    mode: restart
-    parameters:
-      volume: float
-    then:
-      - media_player.volume_set:
-          id: onju_out
-          volume: !lambda return clamp(id(onju_out).volume+volume, 0.0f, 1.0f);
+  - platform: esp32_touch
+    id: volume_up
+    pin: GPIO2
+    threshold: 2000
+    on_press:
+      then:
+        - light.turn_on: right_led
+        - script.execute:
+            id: adjust_volume
+            delta: 0.05
+        - delay: 750ms
+        - while:
+            condition:
+              binary_sensor.is_on: volume_up
+            then:
+              - script.execute:
+                  id: adjust_volume
+                  delta: 0.05
+              - delay: 150ms
+    on_release:
+      then:
+        - light.turn_off: right_led
+        - script.execute: show_volume_then_restore
 
-  - id: show_volume
-    mode: restart
-    then:
-      - light.turn_on:
-          id: top_led
-          effect: show_volume
-      - delay: 1s
-      - script.execute: reset_led
+  - platform: esp32_touch
+    id: action
+    pin: GPIO3
+    threshold: 2000
+    on_click:
+      - min_length: 0ms
+        max_length: 1000ms
+        then:
+          # Short press cascade
+          - if:
+              condition:
+                lambda: return id(alarm_active);
+              then:
+                - if:
+                    condition:
+                      lambda: return id(alarm_dismiss_mode).current_option() == "Touch = stop";
+                    then:
+                      - script.execute: alarm_clock_dismiss
+                    else:
+                      - script.execute: alarm_snooze
+              else:
+                - if:
+                    condition:
+                      lambda: return id(timer_alarm_active);
+                    then:
+                      - script.execute: dismiss_alarm
+                    else:
+                      - if:
+                          condition:
+                            lambda: |-
+                              return id(onju_media_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;
+                          then:
+                            - lambda: |-
+                                id(onju_media_player)
+                                  ->make_call()
+                                  .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_STOP)
+                                  .perform();
+                          else:
+                            - if:
+                                condition: voice_assistant.is_running
+                                then:
+                                  - voice_assistant.stop:
+                                  - lambda: id(va_active) = false;
+                                  - script.execute: reset_led
+                                else:
+                                  - voice_assistant.start:
+      - min_length: 1000ms
+        max_length: 5000ms
+        then:
+          # Long press: dismiss alarm (ringing or snoozed) in "hold = stop" mode
+          - if:
+              condition:
+                lambda: |-
+                  return (id(alarm_active) || id(alarm_snoozed)) &&
+                         id(alarm_dismiss_mode).current_option() == "Touch = snooze, hold = stop";
+              then:
+                - script.execute: alarm_clock_dismiss
 
-  - id: turn_on_wake_word
-    then:
-      - if:
-          condition:
-            and:
-              - binary_sensor.is_off: mute_switch
-              - switch.is_on: use_wake_word
-          then:
-            - lambda: id(va).set_use_wake_word(true);
-            - if:
-                condition:
-                  not:
-                    media_player.is_idle:
-                then:
-                  - media_player.stop:
-            - if:
-                condition:
-                  not:
-                    - voice_assistant.is_running
-                then:
-                  - voice_assistant.start_continuous
-            - script.execute: reset_led
-          else:
-            - logger.log:
-                tag: "turn_on_wake_word"
-                format: "Trying to start listening for wake word, but %s"
-                args:
-                  [
-                    'id(mute_switch).state ? "mute switch is on" : "use wake word toggle is off"',
-                  ]
-                level: "INFO"
+  - platform: gpio
+    id: mute_switch
+    pin:
+      number: GPIO38
+      mode: INPUT_PULLUP
+    name: Disable wake word
+    on_press:
+      - script.execute: stop_wake_word
+    on_release:
+      - script.execute: start_wake_word
 
-  - id: turn_off_wake_word
-    then:
-      - voice_assistant.stop
-      - lambda: id(va).set_use_wake_word(false);
-      - script.execute: reset_led
-
-  - id: calibrate_touch
-    parameters:
-      button: int
-    then:
-      - lambda: |-
-          static byte thresh_indices[3] = {0, 0, 0};
-          static uint32_t sums[3] = {0, 0, 0};
-          static byte qsizes[3] = {0, 0, 0};
-          static int consecutive_anomalies_per_button[3] = {0, 0, 0};
-
-          uint32_t newval;
-          uint32_t* calibration_values;
-          switch(button) {
-            case 0:
-              newval = id(volume_down).get_value();
-              calibration_values = id(touch_calibration_values_left);
-              break;
-            case 1:
-              newval = id(action).get_value();
-              calibration_values = id(touch_calibration_values_center);
-              break;
-            case 2:
-              newval = id(volume_up).get_value();
-              calibration_values = id(touch_calibration_values_right);
-              break;
-            default:
-              ESP_LOGE("touch_calibration", "Invalid button ID (%d)", button);
-              return;
-          }
-
-          if(newval == 0) return;
-
-          //ESP_LOGD("touch_calibration", "[%d] qsize %d, sum %d, thresh_index %d, consecutive_anomalies %d", button, qsizes[button], sums[button], thresh_indices[button], consecutive_anomalies_per_button[button]);
-          //ESP_LOGD("touch_calibration", "[%d] New value is %d", button, newval);
-
-          if(qsizes[button] == 5) {
-            float avg = float(sums[button])/float(qsizes[button]);
-            if((fabs(float(newval)-avg)/avg) > id(thresh_percent)) {
-              consecutive_anomalies_per_button[button]++;
-              //ESP_LOGD("touch_calibration", "[%d] %d anomalies detected.", button, consecutive_anomalies_per_button[button]);
-              if(consecutive_anomalies_per_button[button] < 10)
-                return;
-            } 
-          }
-
-          //ESP_LOGD("touch_calibration", "[%d] Resetting consecutive anomalies counter.", button);
-          consecutive_anomalies_per_button[button] = 0;
-
-
-          if(qsizes[button] == 5) {
-            //ESP_LOGD("touch_calibration", "[%d] Queue full, removing %d.", button, id(touch_calibration_values)[thresh_indices[button]]);
-            sums[button] -= (uint32_t) *(calibration_values+thresh_indices[button]);// id(touch_calibration_values)[thresh_indices[button]];
-            qsizes[button]--;
-          }
-          *(calibration_values+thresh_indices[button]) = newval;
-          sums[button] += newval;
-          qsizes[button]++;
-          thresh_indices[button] = (thresh_indices[button] + 1) % 5;
-
-          //ESP_LOGD("touch_calibration", "[%d] Average value is %d", button, sums[button]/qsizes[button]);
-          uint32_t newthresh = uint32_t((sums[button]/qsizes[button]) * (1.0 + id(thresh_percent)));
-          //ESP_LOGD("touch_calibration", "[%d] Setting threshold %d", button, newthresh);
-
-          switch(button) {
-            case 0:
-              id(volume_down).set_threshold(newthresh);
-              break;
-            case 1:
-              id(action).set_threshold(newthresh);
-              break;
-            case 2:
-              id(volume_up).set_threshold(newthresh);
-              break;
-            default:
-              ESP_LOGE("touch_calibration", "Invalid button ID (%d)", button);
-              return;
-          }
+# --- Switches ---
 
 switch:
   - platform: template
@@ -618,9 +576,10 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
     on_turn_on:
-      - script.execute: turn_on_wake_word
+      - script.execute: start_wake_word
     on_turn_off:
-      - script.execute: turn_off_wake_word
+      - script.execute: stop_wake_word
+
   - platform: template
     name: Wake Word Listening Light
     id: flicker_wake_word
@@ -631,3 +590,601 @@ switch:
       - script.execute: reset_led
     on_turn_off:
       - script.execute: reset_led
+
+  - platform: template
+    name: Music Playback Light
+    id: music_light
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - script.execute: reset_led
+    on_turn_off:
+      - script.execute: reset_led
+
+  - platform: template
+    name: Timer LED Countdown
+    id: timer_led
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - script.execute: reset_led
+    on_turn_off:
+      - script.execute: reset_led
+
+  - platform: gpio
+    id: dac_mute
+    restore_mode: ALWAYS_OFF
+    pin:
+      number: GPIO21
+      inverted: true
+
+  - platform: template
+    name: "Alarm Enabled"
+    id: alarm_enabled
+    icon: "mdi:alarm"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - script.execute: flush_nvs
+      - script.execute: alarm_confirm
+    on_turn_off:
+      - script.stop: alarm_ring
+      - rtttl.stop:
+      - light.turn_off: top_led
+      - script.execute: flush_nvs
+      - lambda: |-
+          id(alarm_active) = false;
+          id(alarm_snoozed) = false;
+      - script.execute: start_wake_word
+      - lambda: |-
+          id(alarm_status).publish_state("idle");
+      - script.execute: reset_led
+
+# --- Settings ---
+
+number:
+  - platform: template
+    name: Noise Suppression Level
+    id: noise_suppression_setting
+    icon: "mdi:microphone-settings"
+    entity_category: config
+    initial_value: 4
+    min_value: 0
+    max_value: 4
+    step: 1
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: id(va).set_noise_suppression_level((uint8_t)x);
+
+  - platform: template
+    name: "Alarm Hour"
+    id: alarm_hour
+    icon: "mdi:clock-outline"
+    entity_category: config
+    mode: box
+    initial_value: 7
+    min_value: 0
+    max_value: 23
+    step: 1
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - script.execute: flush_nvs
+        - if:
+            condition:
+              switch.is_on: alarm_enabled
+            then:
+              - script.execute: alarm_confirm
+
+  - platform: template
+    name: "Alarm Minute"
+    id: alarm_minute
+    icon: "mdi:clock-outline"
+    entity_category: config
+    mode: box
+    initial_value: 0
+    min_value: 0
+    max_value: 59
+    step: 1
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - script.execute: flush_nvs
+        - if:
+            condition:
+              switch.is_on: alarm_enabled
+            then:
+              - script.execute: alarm_confirm
+
+  - platform: template
+    name: "Alarm Snooze Minutes"
+    id: alarm_snooze_minutes
+    icon: "mdi:snooze"
+    entity_category: config
+    initial_value: 9
+    min_value: 1
+    max_value: 30
+    step: 1
+    optimistic: true
+    restore_value: true
+
+# --- Status sensors ---
+
+text_sensor:
+  - platform: template
+    id: timer_status
+    name: "Timer Status"
+    icon: "mdi:timer-outline"
+    update_interval: never
+    lambda: |-
+      return {"idle"};
+
+  - platform: template
+    id: alarm_status
+    name: "Alarm Status"
+    icon: "mdi:alarm"
+    update_interval: never
+    lambda: |-
+      return {"idle"};
+
+# --- Alarm selects ---
+
+select:
+  - platform: template
+    name: "Alarm Tone"
+    id: alarm_tone
+    icon: "mdi:music-note"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: "Classic Alarm"
+    options:
+      - "Classic Alarm"
+      - "Gentle Rise"
+      - "Morning Melody"
+      - "Reveille"
+      - "Crazy Rooster"
+      - "Midnight Driveby"
+      - "Angry Wasp"
+      - "Funeral March"
+      - "Drunk Clown"
+      - "Samba Wake"
+
+  - platform: template
+    name: "Timer Tone"
+    id: timer_tone
+    icon: "mdi:bell-ring"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: "Classic Alarm"
+    options:
+      - "Classic Alarm"
+      - "Gentle Rise"
+      - "Morning Melody"
+      - "Reveille"
+      - "Crazy Rooster"
+      - "Midnight Driveby"
+      - "Angry Wasp"
+      - "Funeral March"
+      - "Drunk Clown"
+      - "Samba Wake"
+
+  - platform: template
+    name: "Alarm Dismiss Mode"
+    id: alarm_dismiss_mode
+    icon: "mdi:gesture-tap"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: "Touch = snooze, voice = stop"
+    options:
+      - "Touch = snooze, voice = stop"
+      - "Touch = snooze, hold = stop"
+      - "Touch = stop"
+
+  - platform: template
+    # Update Channel disabled on beta — firmware_update entity not available
+    name: "Update Channel"
+    id: update_channel
+    icon: "mdi:update"
+    entity_category: config
+    internal: true
+    optimistic: true
+    restore_value: false
+    initial_option: "Off"
+    options:
+      - "Off"
+
+# --- Firmware update ---
+
+# update disabled on beta — spams log with "Update check already in progress"
+# update:
+#   - platform: http_request
+#     name: "Firmware"
+#     id: firmware_update
+#     internal: ${disable_firmware_update}
+#     source: https://github.com/Idskov/onju-voice-esphome/releases/latest/download/manifest.json
+#     update_interval: 24h
+
+# --- Globals ---
+
+globals:
+  - id: showing_volume
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  - id: timer_alarm_active
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  - id: active_timer_count
+    type: int
+    restore_value: false
+    initial_value: "0"
+
+  - id: va_active
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  - id: alarm_active
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  - id: alarm_snoozed
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  - id: alarm_snooze_target_hour
+    type: int
+    restore_value: false
+    initial_value: "0"
+
+  - id: alarm_snooze_target_min
+    type: int
+    restore_value: false
+    initial_value: "0"
+
+# --- Scripts ---
+
+script:
+  # LED priority: volume > alarm clock > timer alarm > voice pipeline > music/announcing > timer countdown > wake word > off
+  - id: reset_led
+    then:
+      - if:
+          condition:
+            lambda: return id(showing_volume);
+          then:
+            []
+          else:
+            - if:
+                condition:
+                  lambda: return id(alarm_active);
+                then:
+                  - light.turn_on:
+                      id: top_led
+                      red: 100%
+                      green: 0%
+                      blue: 0%
+                      brightness: 100%
+                      effect: fast_blink
+                else:
+                  - if:
+                      condition:
+                        lambda: return id(timer_alarm_active);
+                      then:
+                        - light.turn_on:
+                            id: top_led
+                            red: 100%
+                            green: 0%
+                            blue: 0%
+                            brightness: 100%
+                            effect: pulse
+                      else:
+                        - if:
+                            condition:
+                              lambda: return id(va_active);
+                            then:
+                              []
+                            else:
+                              - if:
+                                  condition:
+                                    lambda: |-
+                                      return id(onju_media_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_PLAYING;
+                                  then:
+                                    - if:
+                                        condition:
+                                          switch.is_on: music_light
+                                        then:
+                                          - light.turn_on:
+                                              id: top_led
+                                              blue: 100%
+                                              red: 0%
+                                              green: 60%
+                                              brightness: 50%
+                                              effect: speaking
+                                        else:
+                                          - light.turn_off: top_led
+                                  else:
+                                    - if:
+                                        condition:
+                                          lambda: |-
+                                            return id(onju_media_player).state == media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING;
+                                        then:
+                                          - light.turn_on:
+                                              id: top_led
+                                              blue: 0%
+                                              red: 20%
+                                              green: 100%
+                                              effect: speaking
+                                        else:
+                                          - if:
+                                              condition:
+                                                and:
+                                                  - lambda: return id(active_timer_count) > 0;
+                                                  - switch.is_on: timer_led
+                                              then:
+                                                - light.turn_on:
+                                                    id: top_led
+                                                    red: 100%
+                                                    green: 60%
+                                                    blue: 0%
+                                                    brightness: 70%
+                                                    effect: show_timer
+                                              else:
+                                                - if:
+                                                    condition:
+                                                      and:
+                                                        - switch.is_on: use_wake_word
+                                                        - switch.is_on: flicker_wake_word
+                                                        - binary_sensor.is_off: mute_switch
+                                                    then:
+                                                      - light.turn_on:
+                                                          id: top_led
+                                                          blue: 100%
+                                                          red: 100%
+                                                          green: 0%
+                                                          brightness: 60%
+                                                          effect: listening_ww
+                                                    else:
+                                                      - light.turn_off: top_led
+
+  - id: timer_alarm
+    mode: single
+    then:
+      - lambda: id(timer_alarm_active) = true;
+      - script.execute: stop_wake_word
+      - script.execute: reset_led
+      - while:
+          condition:
+            lambda: return id(timer_alarm_active);
+          then:
+            - rtttl.play:
+                rtttl: !lambda |-
+                  auto tone = id(timer_tone).current_option();
+                  if (tone == "Gentle Rise") {
+                    return "GentlRise:d=4,o=4,b=80:c,p,d,p,e,p,f,p,g,p,a,p,b,p,2c5";
+                  } else if (tone == "Morning Melody") {
+                    return "MornMeldy:d=8,o=5,b=120:e,g,a,g,e,c,d,e,d,c,4e,4g,2a";
+                  } else if (tone == "Reveille") {
+                    return "Reveille:d=8,o=5,b=140:g4,c,c,e,c,e,g,e,c,g4,c,c,e,c,e,4g";
+                  } else if (tone == "Crazy Rooster") {
+                    return "CrazyRstr:d=16,o=5,b=160:c,e,g,8c6,p,p,c,e,g,8c6,p,8e6,8c6,8e6,8g6";
+                  } else if (tone == "Midnight Driveby") {
+                    return "MidDrvby:d=8,o=4,b=100:2f,p,2f,p,4f,4f,4f,p,2f,p,2f";
+                  } else if (tone == "Angry Wasp") {
+                    return "AngryWasp:d=16,o=5,b=200:c,d,c,d,c#,d#,c#,d#,d,e,d,e,d#,f,d#,f,e,f#,e,f#,f,g,f,g";
+                  } else if (tone == "Funeral March") {
+                    return "FunrlMrch:d=4,o=4,b=60:c,c,c,8c,16d#,8c,16d#,2c,g,g,g,8g,16a#,8f,16d#,2c";
+                  } else if (tone == "Drunk Clown") {
+                    return "DrunkClwn:d=8,o=5,b=160:c,f#4,a4,f,d#,g#4,b4,4p,c,e,d,4p,a#4,d#,16p,c#,f,16p,e,a4";
+                  } else if (tone == "Samba Wake") {
+                    return "SambaWake:d=8,o=5,b=180:e,p,16e,e,p,16e,g,e,c,d,p,16d,d,p,16d,f,d,a4,4e";
+                  } else {
+                    return "ClasscAlm:d=16,o=6,b=200:c,c,c,c,p,p,c,c,c,c,p,p,c,c,c,c";
+                  }
+            - wait_until:
+                not:
+                  rtttl.is_playing:
+            - delay: 500ms
+
+  - id: dismiss_alarm
+    mode: single
+    then:
+      - rtttl.stop:
+      - lambda: |-
+          id(timer_alarm_active) = false;
+          id(timer_status).publish_state("idle");
+      - script.execute: start_wake_word
+      - script.execute: reset_led
+
+  - id: start_wake_word
+    then:
+      - if:
+          condition:
+            and:
+              - binary_sensor.is_off: mute_switch
+              - switch.is_on: use_wake_word
+          then:
+            - micro_wake_word.start
+            - script.execute: reset_led
+
+  - id: stop_wake_word
+    then:
+      - micro_wake_word.stop
+      - script.execute: reset_led
+
+  - id: adjust_volume
+    parameters:
+      delta: float
+    then:
+      - lambda: id(showing_volume) = true;
+      - media_player.volume_set:
+          id: onju_media_player
+          volume: !lambda return clamp(id(onju_media_player).volume + delta, 0.0f, 1.0f);
+      - light.turn_on:
+          id: top_led
+          effect: show_volume
+
+  - id: show_volume_then_restore
+    mode: restart
+    then:
+      - delay: 2s
+      - lambda: id(showing_volume) = false;
+      - script.execute: reset_led
+
+  - id: flush_nvs
+    mode: restart
+    then:
+      - delay: 500ms
+      - lambda: global_preferences->sync();
+
+  - id: push_to_talk_timeout
+    mode: restart
+    then:
+      - delay: 15s
+      - voice_assistant.stop:
+      - script.execute: reset_led
+      - script.execute: start_wake_word
+
+  - id: alarm_confirm
+    mode: restart
+    then:
+      - lambda: |-
+          char buf[16];
+          snprintf(buf, sizeof(buf), "set:%02.0f:%02.0f",
+                   id(alarm_hour).state, id(alarm_minute).state);
+          id(alarm_status).publish_state(buf);
+      - light.turn_on:
+          id: top_led
+          red: 0%
+          green: 100%
+          blue: 0%
+          brightness: 100%
+          effect: none
+      - delay: 2s
+      - script.execute: reset_led
+
+  - id: alarm_ring
+    mode: single
+    then:
+      - lambda: |-
+          id(alarm_active) = true;
+          id(alarm_snoozed) = false;
+      - if:
+          condition:
+            voice_assistant.is_running:
+          then:
+            - voice_assistant.stop:
+            - lambda: id(va_active) = false;
+      - if:
+          condition:
+            lambda: return id(timer_alarm_active);
+          then:
+            - script.execute: dismiss_alarm
+      - lambda: |-
+          id(onju_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_STOP)
+            .perform();
+      - script.execute: stop_wake_word
+      - lambda: |-
+          id(alarm_status).publish_state("ringing");
+      - script.execute: reset_led
+      - while:
+          condition:
+            lambda: return id(alarm_active);
+          then:
+            - rtttl.play:
+                rtttl: !lambda |-
+                  auto tone = id(alarm_tone).current_option();
+                  if (tone == "Gentle Rise") {
+                    return "GentlRise:d=4,o=4,b=80:c,p,d,p,e,p,f,p,g,p,a,p,b,p,2c5";
+                  } else if (tone == "Morning Melody") {
+                    return "MornMeldy:d=8,o=5,b=120:e,g,a,g,e,c,d,e,d,c,4e,4g,2a";
+                  } else if (tone == "Reveille") {
+                    return "Reveille:d=8,o=5,b=140:g4,c,c,e,c,e,g,e,c,g4,c,c,e,c,e,4g";
+                  } else if (tone == "Crazy Rooster") {
+                    return "CrazyRstr:d=16,o=5,b=160:c,e,g,8c6,p,p,c,e,g,8c6,p,8e6,8c6,8e6,8g6";
+                  } else if (tone == "Midnight Driveby") {
+                    return "MidDrvby:d=8,o=4,b=100:2f,p,2f,p,4f,4f,4f,p,2f,p,2f";
+                  } else if (tone == "Angry Wasp") {
+                    return "AngryWasp:d=16,o=5,b=200:c,d,c,d,c#,d#,c#,d#,d,e,d,e,d#,f,d#,f,e,f#,e,f#,f,g,f,g";
+                  } else if (tone == "Funeral March") {
+                    return "FunrlMrch:d=4,o=4,b=60:c,c,c,8c,16d#,8c,16d#,2c,g,g,g,8g,16a#,8f,16d#,2c";
+                  } else if (tone == "Drunk Clown") {
+                    return "DrunkClwn:d=8,o=5,b=160:c,f#4,a4,f,d#,g#4,b4,4p,c,e,d,4p,a#4,d#,16p,c#,f,16p,e,a4";
+                  } else if (tone == "Samba Wake") {
+                    return "SambaWake:d=8,o=5,b=180:e,p,16e,e,p,16e,g,e,c,d,p,16d,d,p,16d,f,d,a4,4e";
+                  } else {
+                    return "ClasscAlm:d=16,o=6,b=200:c,c,c,c,p,p,c,c,c,c,p,p,c,c,c,c";
+                  }
+            - wait_until:
+                not:
+                  rtttl.is_playing:
+            - delay: 500ms
+
+  - id: alarm_snooze
+    mode: single
+    then:
+      - script.stop: alarm_ring
+      - rtttl.stop:
+      - light.turn_off: top_led
+      - lambda: |-
+          id(alarm_active) = false;
+          id(alarm_snoozed) = true;
+          auto now = id(ha_time).now();
+          int total_min = now.hour * 60 + now.minute + (int)id(alarm_snooze_minutes).state;
+          id(alarm_snooze_target_hour) = (total_min / 60) % 24;
+          id(alarm_snooze_target_min) = total_min % 60;
+          char buf[16];
+          snprintf(buf, sizeof(buf), "snoozed:%02d:%02d",
+                   id(alarm_snooze_target_hour), id(alarm_snooze_target_min));
+          id(alarm_status).publish_state(buf);
+      - light.turn_on:
+          id: top_led
+          red: 0%
+          green: 100%
+          blue: 0%
+          brightness: 100%
+          effect: none
+      - delay: 1s
+      - script.execute: start_wake_word
+      - script.execute: reset_led
+
+  - id: alarm_clock_dismiss
+    mode: single
+    then:
+      - script.stop: alarm_ring
+      - rtttl.stop:
+      - light.turn_off: top_led
+      - lambda: |-
+          id(alarm_active) = false;
+          id(alarm_snoozed) = false;
+      - if:
+          condition:
+            switch.is_on: alarm_enabled
+          then:
+            - lambda: |-
+                char buf[16];
+                snprintf(buf, sizeof(buf), "set:%02.0f:%02.0f",
+                         id(alarm_hour).state, id(alarm_minute).state);
+                id(alarm_status).publish_state(buf);
+          else:
+            - lambda: |-
+                id(alarm_status).publish_state("idle");
+      - script.execute: start_wake_word
+      - script.execute: reset_led
+
