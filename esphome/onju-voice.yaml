@@ -15,6 +15,8 @@
 substitutions:
   name: onju-voice
   friendly_name: Onju Voice
+  # Roy's working slot on this PCB. Overlay `mic_channel: left` if MWW is deaf.
+  mic_channel: "right"
 
 esphome:
   name: ${name}
@@ -171,7 +173,8 @@ esp_audio_stack:
   bits_per_sample: 32
   slot_bit_width: 32
   correct_dc_offset: true  # SPH0645 DC bias
-  mic_channel: left  # native i2s_audio used left; try right if MWW is deaf
+  rx_slot_mode: stereo  # full L/R frame, then pick one SPH0645
+  mic_channel: ${mic_channel}  # do not set num_channels: 2 — stereo mix is 1–2 dB SNR
   buffers_in_psram: true
   processor_id: aec_processor
   aec_reference: ring_buffer
