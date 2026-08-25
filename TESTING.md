@@ -13,7 +13,7 @@ pytest tests/ -v
 
 | Test file | What it models |
 |-----------|----------------|
-| `test_led_states.py` | LED output for all 96 state combinations, priority order (volume > playing > announcing > wake word > off), full pipeline sequences, volume overlay behavior |
+| `test_led_states.py` | LED output for all 1,536 state combinations, priority order (volume > alarm clock > timer alarm > voice pipeline > playing > announcing > timer countdown > wake word > off), full pipeline sequences, volume overlay behavior |
 | `test_state_transitions.py` | Media player + voice assistant state machines, wake word start/stop logic, I2S bus arbitration (mic XOR speaker), center touch behavior per state |
 
 ### When to run
