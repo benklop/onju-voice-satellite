@@ -8,9 +8,9 @@ This repository is a maintenance fork of [tetele/onju-voice-satellite](https://g
 
 | Now | Next |
 |-----|------|
-| Full duplex: mic stays up during playback | AEC calibration (channel, filter, gains) — software AEC is not XMOS |
+| Dual-mic AFE + I2S keep-alive on the shared bus | Loud-music barge-in / VAD / AGC — software AFE is not XMOS |
 
-One `esp_audio_stack` owns the shared I2S bus so the MEMS mic and amp run together. ESP-SR software AEC is wired so wake-word-during-music is usable; loud music can still mask the wake word — tap the center pad if it misses.
+One `esp_audio_stack` owns the shared I2S bus so both SPH0645s and the amp run together. ESP-SR dual-mic AFE (`mic_num: 2`, Speech Enhancement) feeds wake word and Assist. Loud music can still mask the wake word — tap the center pad if it misses. Overlay `rx_mic_slots: [right, left]` if BSS sounds inverted.
 
 Guides for alarms, wake words, music, and touch controls: **[User Manual](MANUAL.md)**.
 
@@ -84,6 +84,6 @@ Notification sounds in `res/` are [CC BY 4.0](https://creativecommons.org/licens
 - [Tudor Sandu](https://github.com/tetele) — original ESPHome satellite config
 - [Nico Idskov](https://github.com/Idskov) — native ESPHome rewrite this tree is based on
 - [Roy Meissner](https://github.com/rmeissn) — proven Onju duplex + software AEC recipe this tree ports
-- [n-IA-hane](https://github.com/n-IA-hane/esphome-audio-stack) — `esp_audio_stack` / `esp_aec` backend
+- [n-IA-hane](https://github.com/n-IA-hane/esphome-audio-stack) — `esp_audio_stack` / `esp_afe` backend
 - [Kevin Ahrendt](https://github.com/kahrendt) — microWakeWord
 - Home Assistant / ESPHome voice teams
