@@ -168,6 +168,10 @@ esp_afe:
   ns_enabled: false
   vad_enabled: false
   agc_enabled: false
+  # Dual-mic + kept DMA leaves too little contiguous internal for the
+  # 6 KB TX AEC FIR putbuf on first duplex frame. Rings are ~16 KB total.
+  feed_ring_in_psram: true
+  fetch_ring_in_psram: true
 
 esp_audio_stack:
   id: i2s_shared
