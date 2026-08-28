@@ -163,6 +163,7 @@ external_components:
   # v2026.7.0 + STD dual-mic + idle I2S keep-alive. Not n-IA-hane/dev.
   - source: github://benklop/esphome-audio-stack@feat/std-i2s-stereo-dual-mic
     components: [esp_audio_stack, esp_afe]
+    refresh: always
 
 esp_afe:
   id: afe_processor
@@ -1242,4 +1243,3 @@ script:
                 id(alarm_status).publish_state("idle");
       - script.execute: start_wake_word
       - script.execute: reset_led
-
