@@ -68,10 +68,10 @@ esp32:
       CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
       # Dual-mic AFE + kept I2S DMA leaves too little internal RAM for TLS.
       CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
-      # AFE rings + media decode live in PSRAM; default 32 KB data cache
-      # misses enough to underrun 48 kHz TX (snags/pauses).
-      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
-      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      # 64 KB data cache would steal 32 KB of that heap (ESP-IDF: the extra
+      # 32 KB is added to DRAM only when the cache is 32 KB). AES DMA and
+      # HTTP sockets then fail: sock < 0, then `esp-aes: Failed to allocate
+      # memory` mid-TTS. Keep default 32 KB cache; XIP still cuts PSRAM misses.
       CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
       CONFIG_SPIRAM_RODATA: "y"
 
