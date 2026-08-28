@@ -102,7 +102,7 @@ wifi:
   # ESP32 default is LIGHT (modem sleep). RSSI and TX both suffer, and
   # duplex audio already contends for the radio. Voice-kit does the same.
   power_save_mode: none
-  post_connect_roaming: false
+  post_connect_roaming: true
 
 captive_portal:
 
