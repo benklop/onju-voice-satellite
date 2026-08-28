@@ -99,6 +99,7 @@ improv_serial:
 wifi:
   ap:
     ssid: "${friendly_name}"
+  post_connect_roaming: false
 
 captive_portal:
 
