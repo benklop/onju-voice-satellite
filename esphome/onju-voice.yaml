@@ -268,6 +268,10 @@ media_player:
       - script.execute: reset_led
     on_play:
       - script.execute: reset_led
+    on_pause:
+      # Pause is not idle — without this, MWW stays stopped after "pause the music".
+      - script.execute: start_wake_word
+      - script.execute: reset_led
     on_idle:
       - lambda: id(va_active) = false;
       - script.execute: start_wake_word
@@ -331,9 +335,14 @@ voice_assistant:
         effect: processing
 
   on_end:
-    # Don't reset LED or restart MWW here.
-    # on_idle in media_player handles both after speaker finishes.
-    []
+    # on_idle only runs when the player is IDLE. Pause + Assist chime ends
+    # in PAUSED (or still ANNOUNCING until the chime finishes), so MWW never
+    # came back. Wait until VA drops the mic; start_wake_word no-ops if a
+    # continue-conversation turn is still capturing.
+    - wait_until:
+        not:
+          voice_assistant.is_running
+    - script.execute: start_wake_word
 
   on_error:
     - lambda: id(va_active) = false;

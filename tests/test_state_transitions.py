@@ -22,6 +22,7 @@ import pytest
 class MediaPlayerState(Enum):
     IDLE = auto()
     PLAYING = auto()
+    PAUSED = auto()
     ANNOUNCING = auto()
 
 
@@ -127,9 +128,18 @@ class Device:
         # Duplex: playback does not steal the mic / stop MWW
 
     def on_va_end(self):
-        """Voice assistant pipeline ends (data sent, NOT speaker done)"""
+        """Voice assistant finished all tasks (mic released)."""
         self._log("on_end")
-        # Firmware: empty [] — does nothing
+        self.va_active = False
+        self.voice_assistant = VoiceAssistantState.IDLE
+        self.mic_capturing = False
+        self.start_wake_word()
+
+    def on_media_pause(self):
+        """Media player entered PAUSED (Assist pause; not idle)."""
+        self._log("on_pause")
+        self.media_player = MediaPlayerState.PAUSED
+        self.start_wake_word()
 
     def on_va_error(self):
         """Voice assistant error"""
@@ -306,8 +316,9 @@ class TestVoicePipelineTransitions:
         assert d.i2s_user == I2SUser.SPEAKER
 
         d.on_va_end()
-        # on_end is empty — state unchanged
-        assert d.voice_assistant == VoiceAssistantState.RESPONDING
+        assert d.voice_assistant == VoiceAssistantState.IDLE
+        assert d.mww == MWWState.RUNNING
+        assert d.media_player == MediaPlayerState.ANNOUNCING
 
         d.on_media_idle()
         assert d.voice_assistant == VoiceAssistantState.IDLE
@@ -462,7 +473,33 @@ class TestWakeWordControl:
         d.on_wake_word_detected()
         d.on_stt_vad_end()
         d.on_tts_response()
+        d.on_va_end()
         d.on_media_idle()
+        assert d.mww == MWWState.RUNNING
+        assert d.log.count("mww.start") == 2  # connect + after VA; idle is a no-op
+
+    def test_restarts_after_end_without_idle(self):
+        """No TTS / player stays PLAYING — on_end must restart MWW."""
+        d = Device()
+        d.on_client_connected()
+        d.on_play_media()
+        d.on_wake_word_detected()
+        d.on_stt_vad_end()
+        d.on_va_end()
+        assert d.media_player == MediaPlayerState.PLAYING
+        assert d.mww == MWWState.RUNNING
+
+    def test_restarts_after_pause_chime(self):
+        """Pause + announcement never reaches IDLE; on_pause still restarts MWW."""
+        d = Device()
+        d.on_client_connected()
+        d.on_play_media()
+        d.on_wake_word_detected()
+        d.on_stt_vad_end()
+        d.on_tts_response()
+        d.on_va_end()
+        d.on_media_pause()
+        assert d.media_player == MediaPlayerState.PAUSED
         assert d.mww == MWWState.RUNNING
 
     def test_restarts_after_error(self):
