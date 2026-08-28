@@ -99,6 +99,9 @@ improv_serial:
 wifi:
   ap:
     ssid: "${friendly_name}"
+  # ESP32 default is LIGHT (modem sleep). RSSI and TX both suffer, and
+  # duplex audio already contends for the radio. Voice-kit does the same.
+  power_save_mode: none
   post_connect_roaming: false
 
 captive_portal:
