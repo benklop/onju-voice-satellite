@@ -20,10 +20,10 @@ esphome:
   name: ${name}
   name_add_mac_suffix: true
   friendly_name: ${friendly_name}
-  min_version: 2026.5.0
+  min_version: 2026.8.0  # esphome-audio-stack v2026.9.x targets ESPHome 2026.8
   project:
     name: benklop.onju_voice_satellite
-    version: "2.2.0"
+    version: "2.3.0"
   platformio_options:
     board_build.flash_mode: dio
     board_build.arduino.memory_type: qio_opi
@@ -164,8 +164,9 @@ time:
 # music is not 100%. Overlay rx_mic_slots: [right, left] if BSS is inverted.
 
 external_components:
-  # v2026.7.0 + STD dual-mic + idle I2S keep-alive. Not n-IA-hane/dev.
-  - source: github://benklop/esphome-audio-stack@feat/std-i2s-stereo-dual-mic
+  # Upstream stable release that absorbed our STD dual-mic + AEC ref
+  # rate-conversion fixes (v2026.9.2). No fork needed.
+  - source: github://n-IA-hane/esphome-audio-stack@v2026.9.2
     components: [esp_audio_stack, esp_afe]
     refresh: always
 
@@ -198,8 +199,16 @@ esp_audio_stack:
   rx_slot_mode: stereo
   rx_mic_slots: [left, right]
   buffers_in_psram: true
-  # VA drops the mic between STT and MWW; recreating 768-frame DMA then OOMs.
-  idle_teardown: false
+  # NOTE: upstream v2026.9.x always tears down I2S DMA when the last mic
+  # consumer leaves (no idle_teardown option). VA drops the mic between STT
+  # and MWW, so the ~34 KB DMA pair is freed/re-allocated each turn. On this
+  # board that churn fragments internal RAM: MWW start loops on
+  # ESP_ERR_NO_MEM and a later bad_alloc aborted in
+  # VoiceAssistant::get_configuration. The two *_in_psram knobs below are a
+  # stopgap to claw back ~12 KB internal until the idle_dma_alloc opt-out
+  # lands upstream.
+  audio_task_stack_in_psram: true  # ~8 KB internal recovered
+  aec_ref_ring_in_psram: true  # ~4 KB internal recovered (120 ms @ 16 kHz)
   processor_id: afe_processor
   aec_reference: ring_buffer
   aec_reference_buffer_ms: 120
