@@ -15,7 +15,7 @@ jobs:
     name: Validate firmware
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/esphome/esphome:latest
+      image: ghcr.io/esphome/esphome:2026.10.0
     steps:
       - name: Checkout
         uses: actions/checkout@v4

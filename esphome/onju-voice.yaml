@@ -20,7 +20,7 @@ esphome:
   name: ${name}
   name_add_mac_suffix: true
   friendly_name: ${friendly_name}
-  min_version: 2026.8.0  # esphome-audio-stack v2026.9.x targets ESPHome 2026.8
+  min_version: 2026.9.0  # esphome-audio-stack v2026.10.x targets ESPHome 2026.9+
   project:
     name: benklop.onju_voice_satellite
     version: "2.3.0"
@@ -164,9 +164,9 @@ time:
 # music is not 100%. Overlay rx_mic_slots: [right, left] if BSS is inverted.
 
 external_components:
-  # Upstream stable release that absorbed our STD dual-mic + AEC ref
-  # rate-conversion fixes (v2026.9.2). No fork needed.
-  - source: github://n-IA-hane/esphome-audio-stack@v2026.9.2
+  # v2026.10.3-dev adds compile-time compatibility with ESPHome 2026.10's
+  # ring_buffer API change (handle_ is now an accessor). v2026.10.2 is broken.
+  - source: github://n-IA-hane/esphome-audio-stack@v2026.10.3-dev
     components: [esp_audio_stack, esp_afe]
     refresh: always
 
